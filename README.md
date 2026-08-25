@@ -71,3 +71,9 @@ MIT — см. [LICENSE](LICENSE).
 
 
 Создавался для себя, чтобы легче было вести трансляции на твич: https://twitch.tv/tihiy_sosed
+
+
+## Подпись кода
+
+Free code signing is provided by [SignPath.io](https://about.signpath.io/),
+certificate by [SignPath Foundation](https://signpath.org/).
