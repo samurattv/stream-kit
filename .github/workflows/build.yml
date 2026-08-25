@@ -48,7 +48,6 @@ jobs:
           files: StreamKit-windows.zip
 
       - name: Артефакт сборки
-        if: "!startsWith(github.ref, 'refs/tags/')"
         uses: actions/upload-artifact@v4
         with:
           name: StreamKit-windows
