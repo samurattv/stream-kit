@@ -1,3 +1,5 @@
+Code signing is provided by SignPath Foundation, certificate by SignPath.
+
 # StreamKit
 
 Три вещи, которые стример обычно делает руками — и забывает: озвучка чата, переключение сцен и нарезка хайлайтов. StreamKit делает их сам, локально и бесплатно.
