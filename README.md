@@ -68,3 +68,6 @@ streamkit/
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE).
+
+
+Создавался для себя, чтобы легче было вести трансляции на твич: https://twitch.tv/tihiy_sosed
