@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Сборка
+        run: >
+          pyinstaller --noconfirm --windowed --name StreamKit
+          --collect-all torch
+          --collect-all mss
+          --collect-all sounddevice
+          --collect-all obsws_python
+          --hidden-import psutil
+          --hidden-import truststore
+          run.py
+
+      - name: Архив
+        run: Compress-Archive -Path dist/StreamKit/* -DestinationPath StreamKit-windows.zip
+
+      - name: Публикация в релиз
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: StreamKit-windows.zip
+
+      - name: Артефакт сборки
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreamKit-windows
+          path: dist/StreamKit

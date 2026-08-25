@@ -1,0 +1,19 @@
+# настройки и данные пользователя
+config.json
+clips.log
+
+# модель озвучки (качается при первом запуске)
+*.pt
+*.part
+
+# сборка
+build/
+dist/
+*.spec
+installer/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
