@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     runs-on: windows-latest
