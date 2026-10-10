@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import random
+import re
 import socket
 import ssl
 import sys
@@ -19,6 +20,8 @@ import sounddevice as sd
 from .config import (CLIP_LOG, GAME_PROCS, MODEL_ID, MODEL_URL, SAMPLE_RATE,
                      SPEAKERS)
 from .textutils import IGNORED_USERS, IRC_MSG_RE, clean_message, translit
+from .voices import (VoiceBook, apply_effect, device_index, faster_rate,
+                     normalize_loudness, to_ssml, voice_label)
 
 class Worker(threading.Thread):
     def __init__(self, cfg, log, obs=None):
@@ -38,6 +41,10 @@ class ChatTTS(Worker):
         self.queue = queue.Queue(maxsize=12)
         self.model = None
         self.on_command = None      # сюда подключается аватар: on_command(user, текст)
+        self.voices = VoiceBook()
+        self.last_seen = {}         # когда зритель писал в прошлый раз
+        self.cmd_seen = {}          # когда зритель использовал команду озвучки
+        self.recent = {}            # недавние тексты, чтобы не читать одно и то же
 
     def download_model(self):
         """Качаем модель сами: torch.hub рисует прогресс в stderr, которого нет под pyw."""
@@ -127,30 +134,7 @@ class ChatTTS(Worker):
                         if not m:
                             continue
 
-                        user = m.group("user").lower()
-                        raw = m.group("text").strip()
-                        if raw[:1] == "!" and self.on_command:
-                            try:
-                                self.on_command(user, raw)
-                            except Exception as e:
-                                self.log("err", f"команда чата: {e}")
-                        if user in IGNORED_USERS or raw[:1] in ("!", "/", "$"):
-                            continue
-                        now = time.time()
-                        if now - last_seen.get(user, 0) < float(self.cfg["user_cooldown"]):
-                            continue
-
-                        text = clean_message(raw)
-                        if len(text) < 2:
-                            continue
-                        last_seen[user] = now
-                        if self.queue.full():
-                            try:
-                                self.queue.get_nowait()
-                            except queue.Empty:
-                                pass
-                        self.queue.put((user, text))
-                        self.log("chat", f"{user}: {text}")
+                        self.handle_message(m.group("user").lower(), m.group("text").strip())
 
             except Exception as e:
                 if not self.stop_flag.is_set():
@@ -162,27 +146,138 @@ class ChatTTS(Worker):
                 except Exception:
                     pass
 
+    # --- разбор сообщения
+    def _num(self, key, default):
+        try:
+            return int(float(self.cfg.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def handle_message(self, user, raw):
+        """Одно сообщение из чата: команды, фильтры, постановка в очередь на озвучку."""
+        if raw[:1] == "!":
+            if self.cfg.get("tts_commands", True) and self.tts_command(user, raw):
+                return
+            if self.on_command:
+                try:
+                    self.on_command(user, raw)
+                except Exception as e:
+                    self.log("err", f"команда чата: {e}")
+        if user in IGNORED_USERS or raw[:1] in ("!", "/", "$"):
+            return
+        if self.voices.is_muted(user):
+            return
+        now = time.time()
+        if now - self.last_seen.get(user, 0) < float(self.cfg["user_cooldown"]):
+            return
+
+        text = clean_message(raw, numbers=bool(self.cfg.get("tts_numbers", True)),
+                             emotes=self.cfg.get("tts_emotes", "laugh"),
+                             max_chars=self._num("tts_max_chars", 200))
+        if len(text) < 2 or self.blacklisted(raw, text) or self.is_duplicate(text, now):
+            return
+        self.last_seen[user] = now
+        if self.queue.full():
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+        self.queue.put((user, text, now))
+        self.log("chat", f"{user}: {text}")
+
+    def blacklisted(self, raw, text):
+        words = [w.strip().lower() for w in re.split(r"[,;\n]", str(self.cfg.get("tts_blacklist", "")))
+                 if w.strip()]
+        low_raw, low_text = raw.lower(), text.lower()
+        return any(w in low_raw or w in low_text for w in words)
+
+    def is_duplicate(self, text, now):
+        """Одно и то же сообщение подряд от разных людей озвучиваем один раз."""
+        for key in [k for k, t in self.recent.items() if now - t > 30]:
+            del self.recent[key]
+        key = text.lower()
+        if key in self.recent:
+            return True
+        self.recent[key] = now
+        return False
+
+    def tts_command(self, user, raw):
+        """Команды зрителей: !голос, !голос сброс, !тихо, !громко. True — это была наша команда."""
+        parts = raw.lower().replace("ё", "е").split()
+        cmd, arg = parts[0], (parts[1] if len(parts) > 1 else "")
+        voice_cmds, mute_cmds, unmute_cmds = {"!голос", "!voice"}, {"!тихо", "!mute"}, {"!громко", "!unmute"}
+        if cmd in voice_cmds and not self.cfg.get("tts_variety", True):
+            return False                        # без разнообразия голоса менять нечем
+        if cmd not in voice_cmds | mute_cmds | unmute_cmds:
+            return False
+        now = time.time()
+        if now - self.cmd_seen.get(user, 0) < 10:
+            return True                         # не даём засыпать журнал командами
+        self.cmd_seen[user] = now
+        if cmd in voice_cmds:
+            if arg in ("сброс", "reset"):
+                self.voices.reset(user)
+                self.log("tts", f"{user}: голос сброшен")
+            else:
+                self.log("tts", f"{user}: новый голос {voice_label(self.voices.reroll(user))}")
+        elif cmd in mute_cmds:
+            self.voices.set_muted(user, True)
+            self.log("tts", f"{user}: попросил не озвучивать его сообщения")
+        else:
+            self.voices.set_muted(user, False)
+            self.log("tts", f"{user}: озвучка его сообщений снова включена")
+        return True
+
     # --- озвучка
-    def pick_voice(self, user):
-        if self.cfg["voice_mode"] == "random":
-            return random.choice(SPEAKERS)
-        h = hashlib.md5(user.encode("utf-8")).hexdigest()
-        return SPEAKERS[int(h, 16) % len(SPEAKERS)]
+    def synthesize(self, phrase, voice, speed_steps=0):
+        speaker, rate, pitch = voice
+        if speed_steps:
+            rate = faster_rate(rate, speed_steps)
+        if rate == "medium" and pitch == "medium":
+            audio = self.model.apply_tts(text=phrase, speaker=speaker, sample_rate=SAMPLE_RATE)
+        else:
+            try:
+                audio = self.model.apply_tts(ssml_text=to_ssml(phrase, rate, pitch),
+                                             speaker=speaker, sample_rate=SAMPLE_RATE)
+            except Exception:                   # SSML не получился — читаем обычным текстом
+                audio = self.model.apply_tts(text=phrase, speaker=speaker, sample_rate=SAMPLE_RATE)
+        return audio.numpy().astype(np.float32)
+
+    def finish_audio(self, wav):
+        """Выравнивание громкости, эффект, общая громкость и тишина в конце."""
+        if self.cfg.get("tts_normalize", True):
+            wav = normalize_loudness(wav)
+        wav = apply_effect(wav, self.cfg.get("tts_effect", "none"))
+        wav = wav * (float(self.cfg["volume"]) / 100)
+        return np.concatenate([wav, np.zeros(int(SAMPLE_RATE * 0.25), np.float32)])
+
+    def play(self, wav):
+        dev = device_index(self.cfg.get("tts_device", ""))
+        try:
+            sd.play(wav, SAMPLE_RATE, device=dev, blocking=True)
+        except sd.PortAudioError as e:
+            if dev is None:
+                raise
+            self.log("err", f"устройство озвучки недоступно ({e}), играю на основном")
+            sd.play(wav, SAMPLE_RATE, blocking=True)
 
     def speak_loop(self):
         while not self.stop_flag.is_set():
             try:
-                user, text = self.queue.get(timeout=1)
+                user, text, queued_at = self.queue.get(timeout=1)
             except queue.Empty:
                 continue
+            backlog, steps = self.queue.qsize(), 0
+            if self.cfg.get("tts_catchup", True):
+                if backlog >= 6 and time.time() - queued_at > 25:
+                    self.log("tts", f"пропустил устаревшее сообщение от {user}")
+                    continue
+                steps = 2 if backlog >= 6 else 1 if backlog >= 3 else 0
             phrase = f"{translit(user)} пишет. {text}" if self.cfg["say_nickname"] else text
+            voice = self.voices.voice_for(user, self.cfg["voice_mode"],
+                                          self.cfg.get("tts_variety", True))
             try:
-                audio = self.model.apply_tts(
-                    text=phrase, speaker=self.pick_voice(user), sample_rate=SAMPLE_RATE
-                )
-                wav = audio.numpy().astype(np.float32) * (int(self.cfg["volume"]) / 100)
-                wav = np.concatenate([wav, np.zeros(int(SAMPLE_RATE * 0.25), np.float32)])
-                sd.play(wav, SAMPLE_RATE, blocking=True)
+                self.play(self.finish_audio(self.synthesize(phrase, voice, steps)))
             except Exception as e:
                 self.log("err", f"озвучка: {e}")
 

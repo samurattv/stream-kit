@@ -8,12 +8,14 @@ import webbrowser
 from tkinter import messagebox
 
 import customtkinter as ctk
+import numpy as np
 import sounddevice as sd
 
 from . import config as cfg_store
 from .avatar import Avatar, launch_tracker
-from .config import DEFAULTS
+from .config import DEFAULTS, SAMPLE_RATE
 from .obs import ObsLink
+from .voices import EFFECTS, device_index, output_device_names
 from .workers import ChatTTS, Clipper, Director, ValorantClipper
 
 
@@ -228,6 +230,7 @@ class App(ctk.CTk):
             segmented_button_unselected_hover_color=LINE, text_color=TEXT)
         self.tabs.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 0))
         for name, builder in (("Основное", self.tab_main),
+                              ("Озвучка", self.tab_tts),
                               ("League of Legends", self.tab_lol),
                               ("Valorant", self.tab_valorant),
                               ("Аватар", self.tab_avatar)):
@@ -307,6 +310,73 @@ class App(ctk.CTk):
             cb.grid(row=r, column=c * 2 + 1, sticky="w", padx=(0, 18),
                     pady=(0 if r == 0 else 10, 0))
             setattr(self, f"combo_{key}", cb)
+
+    def mapped_combo(self, parent, key, names, width=200):
+        """Список с русскими подписями: в настройках хранится ключ, на экране подпись."""
+        var = tk.StringVar(value=str(self.cfg[key]))
+        self.vars[key] = var
+        disp = tk.StringVar(value=names.get(var.get(), var.get()))
+        by_label = {label: value for value, label in names.items()}
+        return self.combo(parent, disp, list(names.values()), width=width, state="readonly",
+                          command=lambda label: var.set(by_label.get(label, "")))
+
+    def tab_tts(self, page):
+        body = self.card(page, "Голоса и текст")
+        self.check(body, "Десятки голосов: у каждого зрителя свой",
+                   self.bool_var("tts_variety")).pack(anchor="w")
+        self.label(body, "Из пяти голосов получается 45: меняются скорость и высота.",
+                   dim=True).pack(anchor="w", pady=(2, 8))
+        self.check(body, "Читать числа словами (1123 → «одна тысяча сто двадцать три»)",
+                   self.bool_var("tts_numbers")).pack(anchor="w")
+        r = self.row(body, pady=(10, 0))
+        self.label(r, "Смайлы Twitch").pack(side="left", padx=(0, 8))
+        self.mapped_combo(r, "tts_emotes", {"laugh": "смех вместо смайлов", "skip": "пропускать",
+                                            "say": "читать как есть"}, width=190).pack(side="left", padx=(0, 18))
+        self.label(r, "Макс. длина, символов").pack(side="left", padx=(0, 8))
+        self.entry(r, "tts_max_chars", width=64)
+
+        body = self.card(page, "Очередь и громкость")
+        self.check(body, "Если чат заваливает, ускоряться и пропускать устаревшие сообщения",
+                   self.bool_var("tts_catchup")).pack(anchor="w")
+        self.check(body, "Выравнивать громкость фраз (все голоса звучат одинаково)",
+                   self.bool_var("tts_normalize")).pack(anchor="w", pady=(8, 0))
+
+        body = self.card(page, "Звук")
+        r = self.row(body)
+        self.label(r, "Выход").pack(side="left", padx=(0, 8))
+        try:
+            devices = output_device_names()
+        except Exception:
+            devices = []
+        names = {"": "Устройство по умолчанию", **{d: d for d in devices}}
+        saved = str(self.cfg.get("tts_device", ""))
+        if saved and saved not in names:
+            names[saved] = f"{saved} (не найдено)"
+        self.mapped_combo(r, "tts_device", names, width=300).pack(side="left", padx=(0, 10))
+        self.button(r, "Проверить звук", self.test_sound, width=140).pack(side="left")
+        r = self.row(body, pady=(10, 0))
+        self.label(r, "Эффект").pack(side="left", padx=(0, 8))
+        self.mapped_combo(r, "tts_effect", EFFECTS, width=160).pack(side="left")
+        self.label(body, "Отдельное устройство (например, виртуальный кабель) позволяет вести озвучку\n"
+                         "в PRISM отдельной дорожкой и регулировать её громкость на стриме.",
+                   dim=True, justify="left").pack(anchor="w", pady=(8, 0))
+
+        body = self.card(page, "Зрители")
+        self.check(body, "Команды зрителей: !голос, !голос сброс, !тихо, !громко",
+                   self.bool_var("tts_commands")).pack(anchor="w")
+        r = self.row(body, pady=(10, 0))
+        self.label(r, "Не озвучивать слова").pack(side="left", padx=(0, 8))
+        self.entry(r, "tts_blacklist", width=360)
+        self.label(r, "через запятую", dim=True).pack(side="left")
+
+    def test_sound(self):
+        """Короткий сигнал на выбранное устройство, чтобы убедиться, что звук идёт туда, куда надо."""
+        try:
+            t = np.arange(int(SAMPLE_RATE * 0.5)) / SAMPLE_RATE
+            beep = 0.25 * np.sin(2 * np.pi * 880 * t) * np.minimum(1, np.minimum(t, 0.5 - t) * 40)
+            sd.play(beep.astype(np.float32), SAMPLE_RATE, device=device_index(self.vars["tts_device"].get()))
+        except Exception as e:
+            self.log("err", f"не удалось проиграть сигнал: {e}")
 
     def tab_lol(self, page):
         body = self.card(page, "Автоклипы")

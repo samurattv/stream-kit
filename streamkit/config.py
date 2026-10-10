@@ -47,6 +47,17 @@ DEFAULTS = {
     "avatar_chat": True,
     "avatar_look": {},
     "theme": "dark",
+    # озвучка
+    "tts_variety": True,        # десятки голосов из пяти (скорость и высота)
+    "tts_numbers": True,        # числа словами
+    "tts_emotes": "laugh",      # laugh — смех вместо смехового смайла, skip — пропускать, say — читать
+    "tts_max_chars": 200,
+    "tts_catchup": True,        # при большой очереди ускоряться и пропускать устаревшее
+    "tts_normalize": True,      # выравнивать громкость фраз
+    "tts_effect": "none",       # none, radio, robot, echo
+    "tts_device": "",           # название устройства вывода, пусто — по умолчанию
+    "tts_commands": True,       # !голос, !тихо, !громко
+    "tts_blacklist": "",        # слова через запятую
 }
 
 # процессы игр: (кусок имени процесса, роль)
