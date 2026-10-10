@@ -109,8 +109,10 @@ class App(ctk.CTk):
         ctk.set_appearance_mode(self.theme)
         super().__init__(fg_color=BG)
         self.title("Stream Kit")
-        self.geometry("860x800")
-        self.minsize(780, 700)
+        # окно не выше экрана: на небольших мониторах вкладки прокручиваются
+        height = min(880, max(620, self.winfo_screenheight() - 90))
+        self.geometry(f"860x{height}")
+        self.minsize(780, 600)
 
         self.f_body = ctk.CTkFont(family="Segoe UI", size=13)
         self.f_small = ctk.CTkFont(family="Segoe UI", size=12)
@@ -134,14 +136,20 @@ class App(ctk.CTk):
         return ctk.CTkLabel(parent, text=text, font=self.f_small if dim else self.f_body,
                             text_color=TEXT2 if dim else TEXT, anchor="w", **kw)
 
-    def card(self, parent, title, pady=(0, 10)):
-        """Скруглённая карточка с заголовком. Возвращает контейнер для содержимого."""
+    def card(self, parent, title, pady=(0, 10), action=None):
+        """Скруглённая карточка с заголовком. Возвращает контейнер для содержимого.
+
+        action=(текст, команда) — кнопка справа в заголовке, её не сожмёт нехватка места."""
         outer = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=14,
                              border_width=1, border_color=LINE)
         outer.pack(fill="x", pady=pady)
-        if title:
-            ctk.CTkLabel(outer, text=title, font=self.f_small, text_color=TEXT2,
-                         anchor="w").pack(fill="x", padx=16, pady=(12, 0))
+        if title or action:
+            head = ctk.CTkFrame(outer, fg_color="transparent")
+            head.pack(fill="x", padx=16, pady=(10, 0))
+            ctk.CTkLabel(head, text=title, font=self.f_small, text_color=TEXT2,
+                         anchor="w").pack(side="left")
+            if action:
+                self.button(head, action[0], action[1], width=170, height=28).pack(side="right")
         body = ctk.CTkFrame(outer, fg_color="transparent")
         body.pack(fill="x", padx=16, pady=(8, 14))
         return body
@@ -201,8 +209,8 @@ class App(ctk.CTk):
     # ---------------------------------------------------------------- интерфейс
     def build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_rowconfigure(3, weight=1, minsize=150)
+        self.grid_rowconfigure(1, weight=3)
+        self.grid_rowconfigure(3, weight=1, minsize=120)
 
         # --- шапка
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -213,7 +221,7 @@ class App(ctk.CTk):
 
         # --- вкладки
         self.tabs = ctk.CTkTabview(
-            self, fg_color="transparent", corner_radius=14, border_width=0,
+            self, fg_color="transparent", corner_radius=14, border_width=0, height=500,
             segmented_button_fg_color=FIELD, segmented_button_selected_color=CARD,
             segmented_button_selected_hover_color=CARD,
             segmented_button_unselected_color=FIELD,
@@ -223,7 +231,12 @@ class App(ctk.CTk):
                               ("League of Legends", self.tab_lol),
                               ("Valorant", self.tab_valorant),
                               ("Аватар", self.tab_avatar)):
-            builder(self.tabs.add(name))
+            # прокрутка внутри вкладки: в маленьком окне содержимое не обрезается, а прокручивается
+            scroll = ctk.CTkScrollableFrame(self.tabs.add(name), fg_color="transparent",
+                                            scrollbar_button_color=LINE,
+                                            scrollbar_button_hover_color=TEXT2)
+            scroll.pack(fill="both", expand=True)
+            builder(scroll)
 
         # --- нижняя панель со стартом
         bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -245,7 +258,7 @@ class App(ctk.CTk):
         # --- журнал
         self.log_box = ctk.CTkTextbox(self, fg_color=LOG_BG, text_color=TEXT, corner_radius=12,
                                       font=self.f_mono, wrap="word", state="disabled",
-                                      border_width=0)
+                                      border_width=0, height=110)
         self.log_box.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 18))
 
     # ---------------------------------------------------------------- вкладки
@@ -279,7 +292,7 @@ class App(ctk.CTk):
                                          text_color=TEXT2, anchor="w")
         self.prism_status.pack(anchor="w", pady=(8, 0))
 
-        body = self.card(page, "Сцены")
+        body = self.card(page, "Сцены", action=("Загрузить из PRISM", self.load_scenes))
         grid = ctk.CTkFrame(body, fg_color="transparent")
         grid.pack(anchor="w")
         for i, (text, key) in enumerate((("В игре", "scene_game"), ("В лобби", "scene_lobby"),
@@ -294,8 +307,6 @@ class App(ctk.CTk):
             cb.grid(row=r, column=c * 2 + 1, sticky="w", padx=(0, 18),
                     pady=(0 if r == 0 else 10, 0))
             setattr(self, f"combo_{key}", cb)
-        self.button(body, "Загрузить из PRISM", self.load_scenes, width=160).pack(
-            anchor="w", pady=(12, 0))
 
     def tab_lol(self, page):
         body = self.card(page, "Автоклипы")
