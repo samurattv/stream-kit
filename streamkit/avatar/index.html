@@ -695,7 +695,16 @@ connectCommands();
 
 // Слежение идёт на таймере, а не только в кадре отрисовки: Chrome останавливает отрисовку
 // закрытой другим окном вкладки, а камера и пересылка в PRISM должны продолжать работать.
-setInterval(() => { if (!DEMO && !VIEW) track(); }, 20);
+// ?selftest — проверка без камеры: страница шлёт выдуманные движения лица с этого же таймера.
+// По частоте сообщений на сервере видно, притормаживает ли браузер свёрнутое окно.
+const SELFTEST = params.has('selftest');
+setInterval(() => {
+  if (SELFTEST && !VIEW) {
+    const t = performance.now() / 1000;
+    target.jaw = (Math.sin(t * 6) + 1) / 2; target.yaw = Math.sin(t) * .3;
+    sendFace();
+  } else if (!DEMO && !VIEW) track();
+}, 20);
 
 // ---------- loop ----------
 const SPEED = { blinkL: .55, blinkR: .55, jaw: .5, default: .22 };
@@ -716,7 +725,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-if (DEMO) statusEl.textContent = 'Демо без камеры';
+if (DEMO || params.has('selftest')) statusEl.textContent = 'Демо без камеры';
 else if (VIEW) statusEl.textContent = 'Зритель: жду движения со страницы-трекера';
 else initTracking();
 </script>

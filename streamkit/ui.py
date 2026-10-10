@@ -11,7 +11,7 @@ import customtkinter as ctk
 import sounddevice as sd
 
 from . import config as cfg_store
-from .avatar import Avatar
+from .avatar import Avatar, launch_tracker
 from .config import DEFAULTS
 from .obs import ObsLink
 from .workers import ChatTTS, Clipper, Director, ValorantClipper
@@ -358,8 +358,8 @@ class App(ctk.CTk):
     def tab_avatar(self, page):
         body = self.card(page, "Аватар-енот")
         self.check(body, "Включить аватара", self.bool_var("enable_avatar")).pack(anchor="w")
-        self.label(body, "1. Нажми «Старт», потом «Открыть для камеры»: страница откроется в Chrome.\n"
-                         "    Разреши камеру и оставь вкладку открытой — она следит за твоим лицом.\n"
+        self.label(body, "1. Нажми «Старт», потом «Открыть для камеры»: откроется отдельное окно (Edge).\n"
+                         "    Разреши камеру. Окно можно сворачивать, но не закрывай: оно следит за лицом.\n"
                          "2. В PRISM добавь источник «Веб-страница» со ссылкой из кнопки «Ссылка для PRISM».\n"
                          "    Она показывает енота без панели и без камеры, фон прозрачный.",
                    dim=True, justify="left").pack(anchor="w", pady=(8, 10))
@@ -428,7 +428,14 @@ class App(ctk.CTk):
         if not any(isinstance(w, Avatar) for w in self.workers):
             self.log("err", "аватар не запущен: включи галочку и нажми «Старт»")
             return
-        webbrowser.open(self.avatar_url())
+        name = launch_tracker(self.avatar_url())
+        if name:
+            self.log("avatar", f"страница с камерой открыта в окне {name}; её можно сворачивать, "
+                               "но не закрывай")
+        else:
+            self.log("err", "Chrome и Edge не найдены, открываю в браузере по умолчанию: "
+                            "не сворачивай эту вкладку, иначе енот будет лагать")
+            webbrowser.open(self.avatar_url())
 
     def copy_avatar_url(self):
         url = f"{self.avatar_url()}&view&hide&bg=transparent"

@@ -9,6 +9,7 @@ import functools
 import http.server
 import json
 import os
+import subprocess
 import threading
 import time
 
@@ -98,6 +99,43 @@ def parse_command(text, look):
         cur = look.get(what, "none")
         value = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else cycle[0]
     return {what: value}, f"{what}: {value}"
+
+
+# Страница-трекер должна работать и в свёрнутом окне. Firefox притормаживает свёрнутые вкладки,
+# поэтому открываем её в отдельном окне Chromium-браузера (Chrome или Edge, он есть в Windows 11).
+BROWSER_FLAGS = [
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
+]
+
+
+def find_browser():
+    """Путь к Chrome или Edge, если они установлены."""
+    roots = [os.environ.get(k) for k in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData")]
+    tails = [r"Google\Chrome\Application\chrome.exe", r"Microsoft\Edge\Application\msedge.exe"]
+    for tail in tails:                       # сначала Chrome, потом Edge
+        for root in roots:
+            if root and os.path.isfile(os.path.join(root, tail)):
+                return os.path.join(root, tail)
+    return None
+
+
+def launch_tracker(url):
+    """Открывает страницу-трекер отдельным окном без вкладок. Возвращает имя браузера или None.
+
+    У окна свой профиль (%LOCALAPPDATA%\\StreamKit\\browser): разрешение на камеру
+    спрашивается один раз и запоминается."""
+    exe = find_browser()
+    if not exe:
+        return None
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    profile = os.path.join(base, "StreamKit", "browser")
+    os.makedirs(profile, exist_ok=True)
+    subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run",
+                      "--window-size=460,520", *BROWSER_FLAGS])
+    return os.path.basename(exe)
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
