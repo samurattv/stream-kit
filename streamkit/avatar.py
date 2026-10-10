@@ -129,7 +129,13 @@ class Avatar(Worker):
 
     @property
     def page_url(self):
+        """Страница-трекер: открывается в Chrome, следит за лицом по камере."""
         return f"http://127.0.0.1:{self.port}/index.html?ws={self.port + 1}"
+
+    @property
+    def view_url(self):
+        """Страница-зритель для PRISM: без камеры и без панели, прозрачный фон."""
+        return f"{self.page_url}&view&hide&bg=transparent"
 
     # --- управление образом
     def set_look(self, patch):
@@ -182,7 +188,8 @@ class Avatar(Worker):
 
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
         threading.Thread(target=self.ws.serve_forever, daemon=True).start()
-        self.log("avatar", f"страница аватара: {self.page_url}")
+        self.log("avatar", f"в Chrome (камера): {self.page_url}")
+        self.log("avatar", f"в PRISM (источник): {self.view_url}")
         self.stop_flag.wait()
         self._close()
 
@@ -192,12 +199,30 @@ class Avatar(Worker):
             hello = json.dumps({"look": self.look})
         try:
             conn.send(hello)
-            for _ in conn:      # входящих команд нет, просто держим соединение
-                pass
+            for raw in conn:
+                try:
+                    msg = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                if "face" in msg:           # движения лица от страницы-трекера — всем остальным
+                    self._relay(conn, raw)
+                elif isinstance(msg.get("look"), dict):    # одежду выбрали на странице
+                    self.set_look(msg["look"])
         except Exception:
             pass
         finally:
             self.clients.discard(conn)
+
+    def _relay(self, sender, raw):
+        with self.lock:
+            others = [c for c in self.clients if c is not sender]
+        for conn in others:
+            try:
+                conn.send(raw)
+            except Exception:
+                self.clients.discard(conn)
 
     def _close(self):
         for server in (self.http, self.ws):

@@ -54,6 +54,10 @@ const statusEl = document.getElementById('status');
 const ui = document.getElementById('ui');
 const params = new URLSearchParams(location.search);
 const DEMO = params.has('demo');
+// ?view — страница-зритель для PRISM: камеры нет, движения лица приходят через StreamKit
+// от страницы-трекера (обычная вкладка в Chrome с разрешённой камерой).
+const VIEW = params.has('view');
+let wsock = null;
 
 // ---------- settings ----------
 const store = {
@@ -62,10 +66,10 @@ const store = {
 };
 const BGS = ['green', 'transparent', 'window'];
 const BG_NAMES = { green: 'зелёный', transparent: 'прозрачный', window: 'окно' };
-let bg = params.get('bg') || store.get('bg', 'green');
+let bg = params.get('bg') || (VIEW ? 'transparent' : store.get('bg', 'green'));
 let mirror = store.get('mirror', true);
 let cal = store.get('cal', { yaw: 0, pitch: 0, roll: 0 });
-if (params.has('hide')) ui.hidden = true;
+if (params.has('hide') || VIEW) ui.hidden = true;
 
 function applyBg() {
   document.body.className = 'bg-' + bg;
@@ -180,12 +184,24 @@ function track() {
   const ly = ((s.eyeLookUpLeft + s.eyeLookUpRight) - (s.eyeLookDownLeft + s.eyeLookDownRight)) / 2;
   target.lookX = clamp(lx * (mirror ? -1.5 : 1.5), -1, 1);
   target.lookY = clamp(-ly * 1.5, -1, 1);
+  sendFace();
+}
+
+// Отправляем уже откалиброванные и отзеркаленные значения: страница-зритель просто повторяет их.
+let lastSend = 0;
+function sendFace() {
+  const now = performance.now();
+  if (!wsock || wsock.readyState !== 1 || VIEW || now - lastSend < 30) return;
+  lastSend = now;
+  const f = {};
+  for (const k in target) f[k] = Math.round(target[k] * 1000) / 1000;
+  wsock.send(JSON.stringify({ face: f }));
 }
 
 // Idle / demo motion when there is no face in view.
 let nextBlink = 2;
 function idle(t) {
-  const demo = DEMO || !landmarker;
+  const demo = DEMO || (!VIEW && !landmarker);
   target.yaw = demo ? Math.sin(t * .5) * .32 : 0;
   target.pitch = demo ? Math.sin(t * .37 + 1) * .12 : 0;
   target.roll = demo ? Math.sin(t * .29) * .1 : 0;
@@ -226,7 +242,7 @@ const DEFAULT_LOOK = { hoodie: 'indigo', hat: 'none', glasses: 'none', scarf: fa
 const look = { ...DEFAULT_LOOK };
 for (const [k, v] of Object.entries(store.get('look', {}))) if (k in DEFAULT_LOOK) look[k] = v;
 
-function applyLook(patch, save = true) {
+function applyLook(patch, save = true, remote = false) {
   if (patch) {
     if (patch.hoodie in HOODIES) look.hoodie = patch.hoodie;
     if (patch.hat in HATS) look.hat = patch.hat;
@@ -237,6 +253,8 @@ function applyLook(patch, save = true) {
   Object.assign(COL, HOODIES[look.hoodie]);
   if (save) store.set('look', look);
   syncLookUi();
+  // выбор на этой странице передаём в StreamKit, чтобы он дошёл и до страницы в PRISM
+  if (patch && !remote && wsock && wsock.readyState === 1) wsock.send(JSON.stringify({ look: { ...look } }));
 }
 window.setLook = applyLook;
 window.getLook = () => ({ ...look });
@@ -662,20 +680,30 @@ function connectCommands() {
   if (!WS_PORT) return;
   let sock;
   try { sock = new WebSocket('ws://127.0.0.1:' + WS_PORT); } catch { return setTimeout(connectCommands, 3000); }
+  sock.onopen = () => { wsock = sock; };
   sock.onmessage = ev => {
-    try { const m = JSON.parse(ev.data); if (m.look) applyLook(m.look); } catch (e) { console.error(e); }
+    try {
+      const m = JSON.parse(ev.data);
+      if (m.look) applyLook(m.look, true, true);
+      if (m.face && VIEW) { Object.assign(target, m.face); lastFace = performance.now(); }
+    } catch (e) { console.error(e); }
   };
-  sock.onclose = () => setTimeout(connectCommands, 3000);
+  sock.onclose = () => { if (wsock === sock) wsock = null; setTimeout(connectCommands, 3000); };
   sock.onerror = () => sock.close();
 }
 connectCommands();
+
+// Слежение идёт на таймере, а не только в кадре отрисовки: Chrome останавливает отрисовку
+// закрытой другим окном вкладки, а камера и пересылка в PRISM должны продолжать работать.
+setInterval(() => { if (!DEMO && !VIEW) track(); }, 20);
 
 // ---------- loop ----------
 const SPEED = { blinkL: .55, blinkR: .55, jaw: .5, default: .22 };
 function frame(now) {
   const t = now / 1000;
-  if (!DEMO) track();
-  if (DEMO || !landmarker || now - lastFace > 700) idle(t);
+  if (!DEMO && !VIEW) track();
+  const live = (VIEW || landmarker) && now - lastFace < 700;
+  if (DEMO || !live) idle(t);
   for (const k in target) cur[k] += (target[k] - cur[k]) * (SPEED[k] ?? SPEED.default);
   drawBackground();
   drawBody(t);
@@ -689,6 +717,7 @@ function frame(now) {
 }
 requestAnimationFrame(frame);
 if (DEMO) statusEl.textContent = 'Демо без камеры';
+else if (VIEW) statusEl.textContent = 'Зритель: жду движения со страницы-трекера';
 else initTracking();
 </script>
 </body>

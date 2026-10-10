@@ -46,6 +46,7 @@ DEFAULTS = {
     "avatar_port": 8765,
     "avatar_chat": True,
     "avatar_look": {},
+    "theme": "dark",
 }
 
 # процессы игр: (кусок имени процесса, роль)

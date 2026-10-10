@@ -5,15 +5,17 @@ import queue
 import re
 import tkinter as tk
 import webbrowser
-from tkinter import ttk, messagebox
+from tkinter import messagebox
 
+import customtkinter as ctk
 import sounddevice as sd
 
 from . import config as cfg_store
+from .avatar import Avatar
 from .config import DEFAULTS
-from .avatar import Avatar, GLASSES, HATS, HOODIES
 from .obs import ObsLink
 from .workers import ChatTTS, Clipper, Director, ValorantClipper
+
 
 class RegionPicker(tk.Toplevel):
     """Полупрозрачное окно на весь экран: обводим мышкой нужный кусок."""
@@ -67,21 +69,54 @@ class RegionPicker(tk.Toplevel):
 
 # ============================================================ окно программы
 
-COLORS = {
-    "bg": "#1b1d23", "panel": "#23262e", "text": "#dfe3ea",
-    "chat": "#7fb2ff", "tts": "#9d8cff", "dir": "#5fd39a",
-    "clip": "#ffc861", "val": "#ff9d6e", "avatar": "#e6a0c4", "err": "#ff7b72", "sys": "#8b93a3",
+# Цвета заданы парой (светлая тема, тёмная тема): customtkinter сам переключает их.
+BG = ("#f5f1ea", "#1f1d1a")
+CARD = ("#fffdf9", "#2a2723")
+LINE = ("#e6dfd2", "#3a352f")
+TEXT = ("#2b2620", "#ece6dc")
+TEXT2 = ("#7a7165", "#9a9185")
+FIELD = ("#f1ece2", "#1f1d1a")
+ACCENT = ("#c96442", "#d9774f")
+ACCENT_HOVER = ("#b3573a", "#c4663f")
+STOP = ("#a8403a", "#b3453c")
+STOP_HOVER = ("#8f342f", "#9c3a33")
+LOG_BG = ("#efe9dd", "#191714")
+OK = ("#5f8a52", "#8fb27f")
+BAD = ("#c0392b", "#ff7b72")
+
+# Цвета строк журнала: (светлая, тёмная). У tk-тегов нет пар, поэтому подставляем вручную.
+LOG_COLORS = {
+    "chat": ("#2f6fb8", "#7fb2ff"), "tts": ("#6b57c9", "#9d8cff"),
+    "dir": ("#3f7d57", "#5fd39a"), "clip": ("#a8741a", "#ffc861"),
+    "val": ("#c4572b", "#ff9d6e"), "avatar": ("#b24f86", "#e6a0c4"),
+    "err": ("#c0392b", "#ff7b72"), "sys": ("#7a7165", "#9a9185"),
 }
 
+LOOK_NAMES = {
+    "hoodie": {"indigo": "индиго", "red": "красное", "green": "зелёное",
+               "orange": "оранжевое", "black": "чёрное"},
+    "hat": {"none": "без шапки", "beanie": "бини", "cap": "кепка", "crown": "корона"},
+    "glasses": {"none": "без очков", "round": "круглые", "sun": "тёмные"},
+}
 
-class App(tk.Tk):
+SCENE_KEYS = ("scene_game", "scene_lobby", "scene_idle", "scene_intro", "scene_outro")
+
+
+class App(ctk.CTk):
     def __init__(self):
-        super().__init__()
-        self.title("Stream Kit")
-        self.geometry("760x620")
-        self.configure(bg=COLORS["bg"])
-
         self.cfg = cfg_store.load()
+        self.theme = self.cfg.get("theme") if self.cfg.get("theme") in ("dark", "light") else "dark"
+        ctk.set_appearance_mode(self.theme)
+        super().__init__(fg_color=BG)
+        self.title("Stream Kit")
+        self.geometry("860x800")
+        self.minsize(780, 700)
+
+        self.f_body = ctk.CTkFont(family="Segoe UI", size=13)
+        self.f_small = ctk.CTkFont(family="Segoe UI", size=12)
+        self.f_bold = ctk.CTkFont(family="Segoe UI", size=13, weight="bold")
+        self.f_title = ctk.CTkFont(family="Segoe UI", size=20, weight="bold")
+        self.f_mono = ctk.CTkFont(family="Consolas", size=12)
 
         self.vars = {}
         self.workers = []
@@ -90,254 +125,287 @@ class App(tk.Tk):
         self.running = False
 
         self.build_ui()
+        self.retag_log()
         self.after(100, self.drain_log)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    # ---------------------------------------------------------------- заготовки
+    def label(self, parent, text, dim=False, **kw):
+        return ctk.CTkLabel(parent, text=text, font=self.f_small if dim else self.f_body,
+                            text_color=TEXT2 if dim else TEXT, anchor="w", **kw)
+
+    def card(self, parent, title, pady=(0, 10)):
+        """Скруглённая карточка с заголовком. Возвращает контейнер для содержимого."""
+        outer = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=14,
+                             border_width=1, border_color=LINE)
+        outer.pack(fill="x", pady=pady)
+        if title:
+            ctk.CTkLabel(outer, text=title, font=self.f_small, text_color=TEXT2,
+                         anchor="w").pack(fill="x", padx=16, pady=(12, 0))
+        body = ctk.CTkFrame(outer, fg_color="transparent")
+        body.pack(fill="x", padx=16, pady=(8, 14))
+        return body
+
+    def row(self, parent, pady=(0, 0)):
+        f = ctk.CTkFrame(parent, fg_color="transparent")
+        f.pack(anchor="w", fill="x", pady=pady)
+        return f
+
+    def entry(self, parent, key, width=100, show=None, value=None, padx=(0, 14)):
+        text = str(self.cfg[key]) if value is None else value
+        var = tk.StringVar(value=text)
+        self.vars[key] = var
+        e = ctk.CTkEntry(parent, textvariable=var, width=width, height=32, corner_radius=8,
+                         fg_color=FIELD, border_color=LINE, text_color=TEXT, font=self.f_body,
+                         show=show)
+        e.pack(side="left", padx=padx)
+        return e
+
+    def combo(self, parent, var, values, width=150, state="normal", command=None):
+        return ctk.CTkComboBox(parent, variable=var, values=values or [""], width=width,
+                               height=32, corner_radius=8, state=state, font=self.f_body,
+                               dropdown_font=self.f_body, fg_color=FIELD, border_color=LINE,
+                               button_color=LINE, button_hover_color=ACCENT, text_color=TEXT,
+                               dropdown_fg_color=CARD, dropdown_text_color=TEXT,
+                               dropdown_hover_color=FIELD, command=command)
+
+    def check(self, parent, text, var, command=None):
+        return ctk.CTkCheckBox(parent, text=text, variable=var, command=command, font=self.f_body,
+                               text_color=TEXT, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                               border_color=LINE, checkmark_color="#ffffff",
+                               corner_radius=6, checkbox_width=20, checkbox_height=20)
+
+    def radio(self, parent, text, var, value):
+        return ctk.CTkRadioButton(parent, text=text, variable=var, value=value, font=self.f_body,
+                                  text_color=TEXT, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                                  border_color=LINE, radiobutton_width=18, radiobutton_height=18)
+
+    def switch(self, parent, text, key):
+        var = tk.BooleanVar(value=bool(self.cfg[key]))
+        self.vars[key] = var
+        return ctk.CTkSwitch(parent, text=text, variable=var, font=self.f_body, text_color=TEXT,
+                             progress_color=ACCENT, button_color=("#ffffff", "#ece6dc"),
+                             button_hover_color=("#f1ece2", "#ffffff"), fg_color=LINE)
+
+    def button(self, parent, text, command, width=0, height=32, **kw):
+        return ctk.CTkButton(parent, text=text, command=command, width=width, height=height,
+                             corner_radius=8, font=self.f_body, fg_color=FIELD,
+                             hover_color=LINE, text_color=TEXT, border_width=1,
+                             border_color=LINE, **kw)
+
+    def bool_var(self, key):
+        var = tk.BooleanVar(value=bool(self.cfg[key]))
+        self.vars[key] = var
+        return var
+
     # ---------------------------------------------------------------- интерфейс
     def build_ui(self):
-        style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        for widget in ("TLabel", "TCheckbutton", "TRadiobutton", "TFrame",
-                       "TLabelframe", "TLabelframe.Label"):
-            style.configure(widget, background=COLORS["panel"],
-                            foreground=COLORS["text"])
-        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
-        style.configure("TNotebook.Tab", background=COLORS["bg"],
-                        foreground=COLORS["text"], padding=(16, 7))
-        style.map("TNotebook.Tab", background=[("selected", COLORS["panel"])])
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(3, weight=1, minsize=150)
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="x", padx=10, pady=(10, 0))
-        self.tab_main(nb)
-        self.tab_lol(nb)
-        self.tab_valorant(nb)
-        self.tab_avatar(nb)
+        # --- шапка
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=20, pady=(16, 4))
+        ctk.CTkLabel(head, text="Stream Kit", font=self.f_title, text_color=TEXT).pack(side="left")
+        self.theme_btn = self.button(head, self.theme_text(), self.toggle_theme, width=130)
+        self.theme_btn.pack(side="right")
+
+        # --- вкладки
+        self.tabs = ctk.CTkTabview(
+            self, fg_color="transparent", corner_radius=14, border_width=0,
+            segmented_button_fg_color=FIELD, segmented_button_selected_color=CARD,
+            segmented_button_selected_hover_color=CARD,
+            segmented_button_unselected_color=FIELD,
+            segmented_button_unselected_hover_color=LINE, text_color=TEXT)
+        self.tabs.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 0))
+        for name, builder in (("Основное", self.tab_main),
+                              ("League of Legends", self.tab_lol),
+                              ("Valorant", self.tab_valorant),
+                              ("Аватар", self.tab_avatar)):
+            builder(self.tabs.add(name))
 
         # --- нижняя панель со стартом
-        bar = tk.Frame(self, bg=COLORS["panel"], pady=8, padx=10)
-        bar.pack(fill="x", padx=10)
-        left = tk.Frame(bar, bg=COLORS["panel"])
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.grid(row=2, column=0, sticky="ew", padx=20, pady=(8, 8))
+        left = ctk.CTkFrame(bar, fg_color="transparent")
         left.pack(side="left")
-        for label, key in (("Озвучка чата", "enable_tts"),
-                           ("Автосцены", "enable_director")):
-            var = tk.BooleanVar(value=bool(self.cfg[key]))
-            self.vars[key] = var
-            ttk.Checkbutton(left, text=label, variable=var).pack(side="left", padx=(0, 14))
+        self.switch(left, "Озвучка чата", "enable_tts").pack(side="left", padx=(0, 18))
+        self.switch(left, "Автосцены", "enable_director").pack(side="left")
 
-        self.start_btn = tk.Button(bar, text="СТАРТ", command=self.toggle,
-                                   bg="#2f9e63", fg="white", relief="flat",
-                                   font=("Segoe UI", 11, "bold"), width=14,
-                                   cursor="hand2")
-        self.start_btn.pack(side="right", ipady=4)
-
+        self.start_btn = ctk.CTkButton(
+            bar, text="Старт", command=self.toggle, width=150, height=42, corner_radius=10,
+            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#ffffff")
+        self.start_btn.pack(side="right")
         for text, mode in (("Конец", "outro"), ("Интро", "intro")):
-            tk.Button(bar, text=text, command=lambda m=mode: self.show_scene(m),
-                      bg=COLORS["bg"], fg=COLORS["text"], relief="flat", width=8,
-                      cursor="hand2", activebackground=COLORS["panel"]
-                      ).pack(side="right", padx=(0, 8), ipady=4)
+            self.button(bar, text, lambda m=mode: self.show_scene(m), width=84,
+                        height=42).pack(side="right", padx=(0, 8))
 
-        # --- лог
-        frame = tk.Frame(self, bg=COLORS["bg"])
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
-        self.log_box = tk.Text(frame, bg="#15171c", fg=COLORS["text"], relief="flat",
-                               font=("Consolas", 9), wrap="word", state="disabled")
-        self.log_box.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(frame, command=self.log_box.yview)
-        sb.pack(side="right", fill="y")
-        self.log_box.config(yscrollcommand=sb.set)
-        for tag, color in COLORS.items():
-            self.log_box.tag_config(tag, foreground=color)
+        # --- журнал
+        self.log_box = ctk.CTkTextbox(self, fg_color=LOG_BG, text_color=TEXT, corner_radius=12,
+                                      font=self.f_mono, wrap="word", state="disabled",
+                                      border_width=0)
+        self.log_box.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 18))
 
     # ---------------------------------------------------------------- вкладки
-    def tab_main(self, nb):
-        page = tk.Frame(nb, bg=COLORS["panel"], padx=12, pady=10)
-        nb.add(page, text="Основное")
+    def tab_main(self, page):
+        body = self.card(page, "Twitch")
+        r = self.row(body)
+        self.label(r, "Канал").pack(side="left", padx=(0, 8))
+        self.entry(r, "twitch_channel", width=220)
+        self.check(r, "Называть ник", self.bool_var("say_nickname")).pack(side="left")
 
-        box = ttk.LabelFrame(page, text="Twitch", padding=8)
-        box.pack(fill="x", pady=(0, 8))
-        self.field(box, "Канал", "twitch_channel", 0, width=24)
-        self.check(box, "Называть ник", "say_nickname", 0, 2)
-
-        row = tk.Frame(box, bg=COLORS["panel"])
-        row.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
-        ttk.Label(row, text="Голоса:").pack(side="left")
+        r = self.row(body, pady=(10, 0))
+        self.label(r, "Голоса").pack(side="left", padx=(0, 10))
         self.vars["voice_mode"] = tk.StringVar(value=self.cfg["voice_mode"])
-        ttk.Radiobutton(row, text="случайный", value="random",
-                        variable=self.vars["voice_mode"]).pack(side="left", padx=6)
-        ttk.Radiobutton(row, text="свой на зрителя", value="user",
-                        variable=self.vars["voice_mode"]).pack(side="left")
-        ttk.Label(row, text="   Громкость:").pack(side="left")
-        self.vars["volume"] = tk.IntVar(value=self.cfg["volume"])
-        ttk.Scale(row, from_=10, to=100, variable=self.vars["volume"],
-                  length=120).pack(side="left", padx=6)
+        self.radio(r, "случайный", self.vars["voice_mode"], "random").pack(side="left", padx=(0, 12))
+        self.radio(r, "свой на зрителя", self.vars["voice_mode"], "user").pack(side="left", padx=(0, 20))
+        self.label(r, "Громкость").pack(side="left", padx=(0, 8))
+        self.vars["volume"] = tk.IntVar(value=int(self.cfg["volume"]))
+        ctk.CTkSlider(r, from_=10, to=100, number_of_steps=18, variable=self.vars["volume"],
+                      width=140, progress_color=ACCENT, button_color=ACCENT,
+                      button_hover_color=ACCENT_HOVER, fg_color=LINE).pack(side="left")
 
-        box = ttk.LabelFrame(page, text="PRISM / OBS — WebSocket", padding=8)
-        box.pack(fill="x", pady=(0, 8))
-        self.field(box, "Хост", "ws_host", 0, width=12)
-        self.field(box, "Порт", "ws_port", 2, width=8)
-        self.field(box, "Пароль", "ws_password", 4, width=22, show="\u2022")
+        body = self.card(page, "PRISM / OBS")
+        r = self.row(body)
+        self.label(r, "Хост").pack(side="left", padx=(0, 8))
+        self.entry(r, "ws_host", width=130)
+        self.label(r, "Порт").pack(side="left", padx=(0, 8))
+        self.entry(r, "ws_port", width=80)
+        self.label(r, "Пароль").pack(side="left", padx=(0, 8))
+        self.entry(r, "ws_password", width=170, show="•")
+        self.prism_status = ctk.CTkLabel(body, text="●  не подключено", font=self.f_small,
+                                         text_color=TEXT2, anchor="w")
+        self.prism_status.pack(anchor="w", pady=(8, 0))
 
-        box = ttk.LabelFrame(page, text="Сцены", padding=8)
-        box.pack(fill="x")
-        self.combo(box, "В игре", "scene_game", 0)
-        self.combo(box, "В лобби", "scene_lobby", 2)
-        self.combo(box, "Простой", "scene_idle", 4)
-        self.combo(box, "Интро", "scene_intro", 0, row=1)
-        self.combo(box, "Конец", "scene_outro", 2, row=1)
-        tk.Button(box, text="Загрузить из PRISM", command=self.load_scenes,
-                  bg=COLORS["bg"], fg=COLORS["text"], relief="flat", cursor="hand2",
-                  activebackground=COLORS["panel"]).grid(row=2, column=0, columnspan=2,
-                                                         sticky="w", pady=(8, 0))
+        body = self.card(page, "Сцены")
+        grid = ctk.CTkFrame(body, fg_color="transparent")
+        grid.pack(anchor="w")
+        for i, (text, key) in enumerate((("В игре", "scene_game"), ("В лобби", "scene_lobby"),
+                                         ("Простой", "scene_idle"), ("Интро", "scene_intro"),
+                                         ("Конец", "scene_outro"))):
+            r, c = divmod(i, 3)
+            self.label(grid, text).grid(row=r, column=c * 2, sticky="w", padx=(0, 8),
+                                        pady=(0 if r == 0 else 10, 0))
+            var = tk.StringVar(value=str(self.cfg[key]))
+            self.vars[key] = var
+            cb = self.combo(grid, var, [str(self.cfg[key])], width=150)
+            cb.grid(row=r, column=c * 2 + 1, sticky="w", padx=(0, 18),
+                    pady=(0 if r == 0 else 10, 0))
+            setattr(self, f"combo_{key}", cb)
+        self.button(body, "Загрузить из PRISM", self.load_scenes, width=160).pack(
+            anchor="w", pady=(12, 0))
 
-    def tab_lol(self, nb):
-        page = tk.Frame(nb, bg=COLORS["panel"], padx=12, pady=10)
-        nb.add(page, text="League of Legends")
+    def tab_lol(self, page):
+        body = self.card(page, "Автоклипы")
+        self.check(body, "Автоклипы League of Legends", self.bool_var("enable_clipper")).pack(anchor="w")
+        self.label(body, "События берутся из официального API игры — точно и без нагрузки.\n"
+                         "Ловятся убийства, ассисты, мультикиллы, драконы, бароны, эйсы.",
+                   dim=True, justify="left").pack(anchor="w", pady=(8, 10))
+        r = self.row(body)
+        self.check(r, "Сохранять и свои смерти", self.bool_var("save_deaths")).pack(side="left", padx=(0, 24))
+        self.label(r, "Пауза между клипами, сек").pack(side="left", padx=(0, 8))
+        self.entry(r, "clip_cooldown", width=64)
 
-        var = tk.BooleanVar(value=bool(self.cfg["enable_clipper"]))
-        self.vars["enable_clipper"] = var
-        ttk.Checkbutton(page, text="Автоклипы League of Legends",
-                        variable=var).pack(anchor="w")
+    def tab_valorant(self, page):
+        body = self.card(page, "Автоклипы")
+        self.check(body, "Автоклипы Valorant", self.bool_var("enable_valorant")).pack(anchor="w")
+        self.label(body, "API у Valorant нет, поэтому смотрим на киллфид в правом верхнем углу:\n"
+                         "строки с твоим участием игра подсвечивает светлой плашкой.\n"
+                         "Ловятся убийства, ассисты и смерти — всё, что тебя касается.",
+                   dim=True, justify="left").pack(anchor="w", pady=(8, 10))
+        r = self.row(body)
+        self.button(r, "Указать область киллфида", self.pick_region, width=200).pack(side="left")
+        self.region_label = self.label(r, self.region_text(), dim=True)
+        self.region_label.pack(side="left", padx=14)
 
-        ttk.Label(page, justify="left",
-                  text="События берутся из официального API игры — точно и без нагрузки.\n"
-                       "Ловятся убийства, ассисты, мультикиллы, драконы, бароны, эйсы."
-                  ).pack(anchor="w", pady=(6, 12))
-
-        row = tk.Frame(page, bg=COLORS["panel"])
-        row.pack(anchor="w")
-        var = tk.BooleanVar(value=bool(self.cfg["save_deaths"]))
-        self.vars["save_deaths"] = var
-        ttk.Checkbutton(row, text="Сохранять и свои смерти", variable=var).pack(side="left")
-        ttk.Label(row, text="     Пауза между клипами, сек:").pack(side="left")
-        self.vars["clip_cooldown"] = tk.StringVar(value=str(self.cfg["clip_cooldown"]))
-        tk.Entry(row, textvariable=self.vars["clip_cooldown"], width=5,
-                 bg=COLORS["bg"], fg=COLORS["text"], relief="flat",
-                 insertbackground=COLORS["text"]).pack(side="left", padx=6)
-
-    def tab_valorant(self, nb):
-        page = tk.Frame(nb, bg=COLORS["panel"], padx=12, pady=10)
-        nb.add(page, text="Valorant")
-
-        var = tk.BooleanVar(value=bool(self.cfg["enable_valorant"]))
-        self.vars["enable_valorant"] = var
-        ttk.Checkbutton(page, text="Автоклипы Valorant", variable=var).pack(anchor="w")
-
-        ttk.Label(page, justify="left",
-                  text="API у Valorant нет, поэтому смотрим на киллфид в правом верхнем\n"
-                       "углу: строки с твоим участием игра подсвечивает светлой плашкой.\n"
-                       "Ловятся убийства, ассисты и смерти — всё, что тебя касается."
-                  ).pack(anchor="w", pady=(6, 12))
-
-        row = tk.Frame(page, bg=COLORS["panel"])
-        row.pack(anchor="w", pady=(0, 10))
-        tk.Button(row, text="Указать область киллфида", command=self.pick_region,
-                  bg=COLORS["bg"], fg=COLORS["text"], relief="flat", cursor="hand2",
-                  activebackground=COLORS["panel"]).pack(side="left")
-        self.region_label = ttk.Label(row, text=self.region_text())
-        self.region_label.pack(side="left", padx=12)
-
-        row = tk.Frame(page, bg=COLORS["panel"])
-        row.pack(anchor="w", pady=(0, 8))
-        ttk.Label(row, text="Ловим по:").pack(side="left")
+        body = self.card(page, "Как ловим")
+        r = self.row(body)
+        self.label(r, "Ловим по").pack(side="left", padx=(0, 10))
         self.vars["val_mode"] = tk.StringVar(value=self.cfg.get("val_mode", "color"))
-        for text, value in (("цвету плашки", "color"),
-                            ("яркости", "highlight"),
-                            ("изменению", "change")):
-            ttk.Radiobutton(row, text=text, value=value,
-                            variable=self.vars["val_mode"]).pack(side="left", padx=6)
+        for text, value in (("цвету плашки", "color"), ("яркости", "highlight"), ("изменению", "change")):
+            self.radio(r, text, self.vars["val_mode"], value).pack(side="left", padx=(0, 14))
 
-        row = tk.Frame(page, bg=COLORS["panel"])
-        row.pack(anchor="w", pady=(0, 6))
-        ttk.Label(row, text="Цвет плашки R,G,B:").pack(side="left")
-        self.vars["val_color"] = tk.StringVar(
-            value=",".join(str(c) for c in self.cfg["val_color"]))
-        tk.Entry(row, textvariable=self.vars["val_color"], width=12,
-                 bg=COLORS["bg"], fg=COLORS["text"], relief="flat",
-                 insertbackground=COLORS["text"]).pack(side="left", padx=(4, 12))
-        for label, key in (("Допуск:", "val_tolerance"),
-                           ("  Полоса, px:", "val_run"),
-                           ("  Доля, %:", "val_color_share")):
-            ttk.Label(row, text=label).pack(side="left")
-            self.vars[key] = tk.StringVar(value=str(self.cfg[key]))
-            tk.Entry(row, textvariable=self.vars[key], width=5,
-                     bg=COLORS["bg"], fg=COLORS["text"], relief="flat",
-                     insertbackground=COLORS["text"]).pack(side="left", padx=(4, 0))
+        r = self.row(body, pady=(10, 0))
+        self.label(r, "Цвет плашки R,G,B").pack(side="left", padx=(0, 8))
+        self.entry(r, "val_color", width=110, value=",".join(str(c) for c in self.cfg["val_color"]))
+        for label, key in (("Допуск", "val_tolerance"), ("Полоса, px", "val_run"),
+                           ("Доля, %", "val_color_share")):
+            self.label(r, label).pack(side="left", padx=(0, 8))
+            self.entry(r, key, width=60)
 
-        row = tk.Frame(page, bg=COLORS["panel"])
-        row.pack(anchor="w")
-        for label, key in (("Яркость:", "val_bright"),
-                           ("  Светлых, %:", "val_share"),
-                           ("  Изменение:", "val_sensitivity"),
-                           ("  Пауза, сек:", "val_cooldown")):
-            ttk.Label(row, text=label).pack(side="left")
-            self.vars[key] = tk.StringVar(value=str(self.cfg[key]))
-            tk.Entry(row, textvariable=self.vars[key], width=5,
-                     bg=COLORS["bg"], fg=COLORS["text"], relief="flat",
-                     insertbackground=COLORS["text"]).pack(side="left", padx=(4, 0))
+        r = self.row(body, pady=(10, 0))
+        for label, key in (("Яркость", "val_bright"), ("Светлых, %", "val_share"),
+                           ("Изменение", "val_sensitivity"), ("Пауза, сек", "val_cooldown")):
+            self.label(r, label).pack(side="left", padx=(0, 8))
+            self.entry(r, key, width=60)
 
-        var = tk.BooleanVar(value=bool(self.cfg["val_test"]))
-        self.vars["val_test"] = var
-        ttk.Checkbutton(page, text="Режим проверки — писать в лог, но не сохранять",
-                        variable=var).pack(anchor="w", pady=(12, 0))
+        self.check(body, "Режим проверки — писать в журнал, но не сохранять",
+                   self.bool_var("val_test")).pack(anchor="w", pady=(12, 0))
 
-    def tab_avatar(self, nb):
-        page = tk.Frame(nb, bg=COLORS["panel"], padx=12, pady=10)
-        nb.add(page, text="Аватар")
+    def tab_avatar(self, page):
+        body = self.card(page, "Аватар-енот")
+        self.check(body, "Включить аватара", self.bool_var("enable_avatar")).pack(anchor="w")
+        self.label(body, "1. Нажми «Старт», потом «Открыть для камеры»: страница откроется в Chrome.\n"
+                         "    Разреши камеру и оставь вкладку открытой — она следит за твоим лицом.\n"
+                         "2. В PRISM добавь источник «Веб-страница» со ссылкой из кнопки «Ссылка для PRISM».\n"
+                         "    Она показывает енота без панели и без камеры, фон прозрачный.",
+                   dim=True, justify="left").pack(anchor="w", pady=(8, 10))
+        r = self.row(body)
+        self.label(r, "Порт").pack(side="left", padx=(0, 8))
+        self.entry(r, "avatar_port", width=80)
+        self.button(r, "Открыть для камеры", self.open_avatar, width=170).pack(side="left", padx=(0, 8))
+        self.button(r, "Ссылка для PRISM", self.copy_avatar_url, width=160).pack(side="left")
 
-        var = tk.BooleanVar(value=bool(self.cfg["enable_avatar"]))
-        self.vars["enable_avatar"] = var
-        ttk.Checkbutton(page, text="Аватар-енот", variable=var).pack(anchor="w")
-        ttk.Label(page, justify="left",
-                  text="Енот повторяет твоё лицо с веб-камеры. Открой страницу в Chrome,\n"
-                       "разреши камеру и захвати окно в PRISM (фон — хромакей)."
-                  ).pack(anchor="w", pady=(6, 10))
-
-        row = tk.Frame(page, bg=COLORS["panel"])
-        row.pack(anchor="w")
-        ttk.Label(row, text="Порт:").pack(side="left")
-        self.vars["avatar_port"] = tk.StringVar(value=str(self.cfg["avatar_port"]))
-        tk.Entry(row, textvariable=self.vars["avatar_port"], width=7, bg=COLORS["bg"],
-                 fg=COLORS["text"], relief="flat",
-                 insertbackground=COLORS["text"]).pack(side="left", padx=(6, 12))
-        for text, cmd in (("Открыть аватар", self.open_avatar),
-                          ("Скопировать ссылку", self.copy_avatar_url)):
-            tk.Button(row, text=text, command=cmd, bg=COLORS["bg"], fg=COLORS["text"],
-                      relief="flat", cursor="hand2", activebackground=COLORS["panel"]
-                      ).pack(side="left", padx=(0, 8))
-
-        box = ttk.LabelFrame(page, text="Одежда", padding=8)
-        box.pack(fill="x", pady=(12, 0))
+        body = self.card(page, "Одежда")
         look = self.cfg.get("avatar_look") or {}
         self.look_vars = {}
-        row = tk.Frame(box, bg=COLORS["panel"])
-        row.pack(anchor="w")
-        for label, key, options, default in (
-                ("Худи", "hoodie", HOODIES, "indigo"),
-                ("Шапка", "hat", ["none"] + HATS, "none"),
-                ("Очки", "glasses", ["none"] + GLASSES, "none")):
-            ttk.Label(row, text=label).pack(side="left", padx=(0, 4))
+        self.look_disp = {}
+        r = self.row(body)
+        for label, key, default in (("Худи", "hoodie", "indigo"),
+                                    ("Шапка", "hat", "none"),
+                                    ("Очки", "glasses", "none")):
+            self.label(r, label).pack(side="left", padx=(0, 8))
             v = tk.StringVar(value=look.get(key, default))
-            self.look_vars[key] = v
-            cb = ttk.Combobox(row, textvariable=v, values=options, width=9, state="readonly")
-            cb.pack(side="left", padx=(0, 12))
-            cb.bind("<<ComboboxSelected>>", lambda e: self.apply_look())
-        row = tk.Frame(box, bg=COLORS["panel"])
-        row.pack(anchor="w", pady=(8, 0))
-        for label, key, default in (("Шарф", "scarf", False),):
-            v = tk.BooleanVar(value=bool(look.get(key, default)))
-            self.look_vars[key] = v
-            ttk.Checkbutton(row, text=label, variable=v,
-                            command=self.apply_look).pack(side="left", padx=(0, 14))
+            self.look_vars[key] = v                  # то, что понимает аватар (indigo, cap…)
+            names = LOOK_NAMES[key]
+            disp = tk.StringVar(value=names.get(v.get(), v.get()))
+            self.look_disp[key] = (disp, names)      # то, что видит человек (индиго, кепка…)
+            self.combo(r, disp, list(names.values()), width=130, state="readonly",
+                       command=lambda _l, k=key: self.pick_look(k)).pack(side="left", padx=(0, 16))
+        r = self.row(body, pady=(10, 0))
+        v = tk.BooleanVar(value=bool(look.get("scarf", False)))
+        self.look_vars["scarf"] = v
+        self.check(r, "Шарф", v, command=self.apply_look).pack(side="left")
 
-        var = tk.BooleanVar(value=bool(self.cfg["avatar_chat"]))
-        self.vars["avatar_chat"] = var
-        ttk.Checkbutton(page, text="Команды из чата: !шапка, !кепка, !очки, !худи, !шарф, "
-                                   "!образ (нужна озвучка чата)",
-                        variable=var).pack(anchor="w", pady=(12, 0))
+        body = self.card(page, "Чат")
+        self.check(body, "Команды из чата: !шапка, !кепка, !очки, !худи, !шарф, !образ",
+                   self.bool_var("avatar_chat")).pack(anchor="w")
+        self.label(body, "Команды читает озвучка чата, поэтому она должна быть включена.",
+                   dim=True).pack(anchor="w", pady=(6, 0))
 
+    # ---------------------------------------------------------------- тема
+    def theme_text(self):
+        return "Светлая тема" if self.theme == "dark" else "Тёмная тема"
+
+    def toggle_theme(self):
+        self.theme = "light" if self.theme == "dark" else "dark"
+        ctk.set_appearance_mode(self.theme)
+        self.cfg["theme"] = self.theme
+        self.theme_btn.configure(text=self.theme_text())
+        self.retag_log()
+
+    def retag_log(self):
+        idx = 1 if self.theme == "dark" else 0
+        for tag, colors in LOG_COLORS.items():
+            self.log_box.tag_config(tag, foreground=colors[idx])
+
+    def set_prism_status(self, text, ok=None):
+        color = TEXT2 if ok is None else (OK if ok else BAD)
+        self.prism_status.configure(text=f"●  {text}", text_color=color)
+
+    # ---------------------------------------------------------------- аватар
     def avatar_url(self):
         try:
             port = int(self.vars["avatar_port"].get())
@@ -347,14 +415,21 @@ class App(tk.Tk):
 
     def open_avatar(self):
         if not any(isinstance(w, Avatar) for w in self.workers):
-            self.log("err", "аватар не запущен: включи галочку и нажми СТАРТ")
+            self.log("err", "аватар не запущен: включи галочку и нажми «Старт»")
             return
         webbrowser.open(self.avatar_url())
 
     def copy_avatar_url(self):
+        url = f"{self.avatar_url()}&view&hide&bg=transparent"
         self.clipboard_clear()
-        self.clipboard_append(self.avatar_url())
-        self.log("sys", f"ссылка скопирована: {self.avatar_url()}")
+        self.clipboard_append(url)
+        self.log("sys", f"ссылка для PRISM скопирована: {url}")
+
+    def pick_look(self, key):
+        disp, names = self.look_disp[key]
+        by_label = {label: value for value, label in names.items()}
+        self.look_vars[key].set(by_label.get(disp.get(), "none"))
+        self.apply_look()
 
     def apply_look(self):
         """Выбор в списках «Одежда» — сразу на енота и в настройки."""
@@ -364,6 +439,20 @@ class App(tk.Tk):
         if avatar:
             avatar.set_look(look)
 
+    def sync_look(self):
+        """Команды из чата меняют образ — показываем это и в списках «Одежда»."""
+        avatar = next((w for w in self.workers if isinstance(w, Avatar)), None)
+        if not avatar or not hasattr(self, "look_vars"):
+            return
+        for key, var in self.look_vars.items():
+            value = avatar.look.get(key)
+            if value is not None and var.get() != value:
+                var.set(value)
+                if key in self.look_disp:
+                    disp, names = self.look_disp[key]
+                    disp.set(names.get(value, value))
+
+    # ---------------------------------------------------------------- Valorant
     def region_text(self):
         r = self.cfg.get("val_region") or []
         if len(r) == 4:
@@ -373,40 +462,19 @@ class App(tk.Tk):
     def pick_region(self):
         def done(region):
             self.cfg["val_region"] = region
-            self.region_label.config(text=self.region_text())
+            self.region_label.configure(text=self.region_text())
             self.collect()          # сразу пишем в config.json, чтобы не потерялось
             self.log("sys", f"область киллфида сохранена: {region}")
             self.deiconify()
 
         self.iconify()
         self.after(400, lambda: RegionPicker(self, done))
-    def field(self, parent, label, key, col, width=20, show=None):
-        ttk.Label(parent, text=label).grid(row=0, column=col, sticky="w", padx=(0, 6))
-        var = tk.StringVar(value=str(self.cfg[key]))
-        self.vars[key] = var
-        tk.Entry(parent, textvariable=var, width=width, bg=COLORS["bg"],
-                 fg=COLORS["text"], relief="flat", insertbackground=COLORS["text"],
-                 show=show).grid(row=0, column=col + 1, sticky="w", padx=(0, 16))
-
-    def combo(self, parent, label, key, col, row=0):
-        ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", padx=(0, 6),
-                                           pady=(6 if row else 0, 0))
-        var = tk.StringVar(value=str(self.cfg[key]))
-        self.vars[key] = var
-        cb = ttk.Combobox(parent, textvariable=var, width=16, state="normal")
-        cb.grid(row=row, column=col + 1, sticky="w", padx=(0, 16), pady=(6 if row else 0, 0))
-        setattr(self, f"combo_{key}", cb)
-
-    def check(self, parent, label, key, row, col):
-        var = tk.BooleanVar(value=bool(self.cfg[key]))
-        self.vars[key] = var
-        ttk.Checkbutton(parent, text=label, variable=var).grid(
-            row=row, column=col, sticky="w", padx=(0, 12))
 
     # ---------------------------------------------------------------- логика
     def collect(self):
         for key, var in self.vars.items():
             self.cfg[key] = var.get()
+        self.cfg["theme"] = self.theme
 
         # цвет вводится строкой "248,104,80" — превращаем в список чисел
         raw = self.cfg.get("val_color")
@@ -429,22 +497,12 @@ class App(tk.Tk):
         while not self.log_queue.empty():
             tag, text = self.log_queue.get()
             stamp = datetime.datetime.now().strftime("%H:%M:%S")
-            self.log_box.config(state="normal")
+            self.log_box.configure(state="normal")
             self.log_box.insert("end", f"{stamp}  {text}\n", tag)
             self.log_box.see("end")
-            self.log_box.config(state="disabled")
+            self.log_box.configure(state="disabled")
         self.sync_look()
         self.after(150, self.drain_log)
-
-    def sync_look(self):
-        """Команды из чата меняют образ — показываем это и в списках «Одежда»."""
-        avatar = next((w for w in self.workers if isinstance(w, Avatar)), None)
-        if not avatar or not hasattr(self, "look_vars"):
-            return
-        for key, var in self.look_vars.items():
-            value = avatar.look.get(key)
-            if value is not None and var.get() != value:
-                var.set(value)
 
     def load_scenes(self):
         self.collect()
@@ -452,11 +510,12 @@ class App(tk.Tk):
             obs = ObsLink(self.cfg, self.log)
             version = obs.connect()
             names = obs.scenes()
-            for key in ("scene_game", "scene_lobby", "scene_idle",
-                        "scene_intro", "scene_outro"):
-                getattr(self, f"combo_{key}")["values"] = names
+            for key in SCENE_KEYS:
+                getattr(self, f"combo_{key}").configure(values=names or [""])
+            self.set_prism_status(f"подключено, версия {version}", True)
             self.log("sys", f"PRISM {version}: сцены загружены ({len(names)} шт.)")
         except Exception as e:
+            self.set_prism_status("не удалось подключиться", False)
             self.log("err", f"не подключился к PRISM: {e}")
             messagebox.showerror("PRISM", f"Не удалось подключиться:\n{e}\n\n"
                                           "Проверь, что PRISM запущен, WebSocket включён "
@@ -495,8 +554,10 @@ class App(tk.Tk):
         if need_obs:
             try:
                 version = self.obs.connect()
+                self.set_prism_status(f"подключено, версия {version}", True)
                 self.log("sys", f"PRISM подключён, версия {version}")
             except Exception as e:
+                self.set_prism_status("не удалось подключиться", False)
                 self.log("err", f"PRISM недоступен: {e}")
                 messagebox.showerror("PRISM", f"Не удалось подключиться:\n{e}")
                 return
@@ -525,7 +586,7 @@ class App(tk.Tk):
             w.start()
 
         self.running = True
-        self.start_btn.config(text="СТОП", bg="#b3453c")
+        self.start_btn.configure(text="Стоп", fg_color=STOP, hover_color=STOP_HOVER)
         self.log("sys", "поехали")
 
     def stop_all(self):
@@ -537,7 +598,7 @@ class App(tk.Tk):
             pass
         self.workers = []
         self.running = False
-        self.start_btn.config(text="СТАРТ", bg="#2f9e63")
+        self.start_btn.configure(text="Старт", fg_color=ACCENT, hover_color=ACCENT_HOVER)
         self.log("sys", "остановлено")
 
     def on_close(self):
