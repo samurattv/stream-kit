@@ -19,6 +19,8 @@ DEFAULTS = {
     "scene_game": "",
     "scene_lobby": "",
     "scene_idle": "",
+    "scene_intro": "",
+    "scene_outro": "",
     "voice_mode": "random",
     "say_nickname": True,
     "volume": 90,

@@ -130,6 +130,12 @@ class App(tk.Tk):
                                    cursor="hand2")
         self.start_btn.pack(side="right", ipady=4)
 
+        for text, mode in (("Конец", "outro"), ("Интро", "intro")):
+            tk.Button(bar, text=text, command=lambda m=mode: self.show_scene(m),
+                      bg=COLORS["bg"], fg=COLORS["text"], relief="flat", width=8,
+                      cursor="hand2", activebackground=COLORS["panel"]
+                      ).pack(side="right", padx=(0, 8), ipady=4)
+
         # --- лог
         frame = tk.Frame(self, bg=COLORS["bg"])
         frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -176,9 +182,11 @@ class App(tk.Tk):
         self.combo(box, "В игре", "scene_game", 0)
         self.combo(box, "В лобби", "scene_lobby", 2)
         self.combo(box, "Простой", "scene_idle", 4)
+        self.combo(box, "Интро", "scene_intro", 0, row=1)
+        self.combo(box, "Конец", "scene_outro", 2, row=1)
         tk.Button(box, text="Загрузить из PRISM", command=self.load_scenes,
                   bg=COLORS["bg"], fg=COLORS["text"], relief="flat", cursor="hand2",
-                  activebackground=COLORS["panel"]).grid(row=1, column=0, columnspan=2,
+                  activebackground=COLORS["panel"]).grid(row=2, column=0, columnspan=2,
                                                          sticky="w", pady=(8, 0))
 
     def tab_lol(self, nb):
@@ -296,12 +304,13 @@ class App(tk.Tk):
                  fg=COLORS["text"], relief="flat", insertbackground=COLORS["text"],
                  show=show).grid(row=0, column=col + 1, sticky="w", padx=(0, 16))
 
-    def combo(self, parent, label, key, col):
-        ttk.Label(parent, text=label).grid(row=0, column=col, sticky="w", padx=(0, 6))
+    def combo(self, parent, label, key, col, row=0):
+        ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", padx=(0, 6),
+                                           pady=(6 if row else 0, 0))
         var = tk.StringVar(value=str(self.cfg[key]))
         self.vars[key] = var
         cb = ttk.Combobox(parent, textvariable=var, width=16, state="normal")
-        cb.grid(row=0, column=col + 1, sticky="w", padx=(0, 16))
+        cb.grid(row=row, column=col + 1, sticky="w", padx=(0, 16), pady=(6 if row else 0, 0))
         setattr(self, f"combo_{key}", cb)
 
     def check(self, parent, label, key, row, col):
@@ -348,7 +357,8 @@ class App(tk.Tk):
             obs = ObsLink(self.cfg, self.log)
             version = obs.connect()
             names = obs.scenes()
-            for key in ("scene_game", "scene_lobby", "scene_idle"):
+            for key in ("scene_game", "scene_lobby", "scene_idle",
+                        "scene_intro", "scene_outro"):
                 getattr(self, f"combo_{key}")["values"] = names
             self.log("sys", f"PRISM {version}: сцены загружены ({len(names)} шт.)")
         except Exception as e:
@@ -356,6 +366,24 @@ class App(tk.Tk):
             messagebox.showerror("PRISM", f"Не удалось подключиться:\n{e}\n\n"
                                           "Проверь, что PRISM запущен, WebSocket включён "
                                           "и пароль совпадает.")
+
+    def show_scene(self, mode):
+        """Кнопки «Интро» и «Конец»: включают сцену и ставят автосцены на паузу."""
+        self.collect()
+        key = "scene_intro" if mode == "intro" else "scene_outro"
+        target = self.cfg[key]
+        if not target:
+            self.log("err", f"сцена «{'Интро' if mode == 'intro' else 'Конец'}» не выбрана")
+            return
+        director = next((w for w in self.workers if isinstance(w, Director)), None)
+        if director:
+            director.set_mode(mode)      # сама переключит сцену
+            return
+        try:
+            (self.obs or ObsLink(self.cfg, self.log)).call("set_current_program_scene", target)
+            self.log("dir", f"сцена -> {target}")
+        except Exception as e:
+            self.log("err", f"не удалось переключить сцену: {e}")
 
     def toggle(self):
         if self.running:

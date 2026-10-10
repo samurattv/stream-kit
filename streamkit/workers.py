@@ -184,6 +184,16 @@ class ChatTTS(Worker):
 class Director(Worker):
     """Переключает сцены по запущенной игре и держит буфер повтора."""
 
+    def __init__(self, cfg, log, obs=None):
+        super().__init__(cfg, log, obs)
+        # intro — ждём запуска игры, auto — следим за играми, outro — после «Конец»
+        self.mode = "intro" if cfg.get("scene_intro") else "auto"
+        self.mode_changed = threading.Event()
+
+    def set_mode(self, mode):
+        self.mode = mode
+        self.mode_changed.set()
+
     def run(self):
         import psutil
         scenes = {
@@ -192,6 +202,8 @@ class Director(Worker):
             "idle": self.cfg["scene_idle"],
         }
         last, buffer_on = None, None
+        intro_from = None            # какая роль была в момент включения интро
+        self.mode_changed.set()      # первый проход: применить стартовый режим
         self.log("dir", "слежу за играми")
 
         while not self.stop_flag.is_set():
@@ -204,8 +216,24 @@ class Director(Worker):
                         role = r
                         break
 
+                if self.mode_changed.is_set():
+                    self.mode_changed.clear()
+                    special = {"intro": self.cfg["scene_intro"],
+                               "outro": self.cfg["scene_outro"]}.get(self.mode)
+                    if special:
+                        self.obs.call("set_current_program_scene", special)
+                        self.log("dir", f"сцена -> {special}")
+                    last = special or None
+                    intro_from = role
+                    if self.mode == "intro":
+                        self.log("dir", "интро включено, жду запуск игры")
+
+                # из интро выходим, когда запустилась игра (роль сменилась с исходной)
+                if self.mode == "intro" and role != "idle" and role != intro_from:
+                    self.mode, last = "auto", None
+
                 target = scenes.get(role) or ""
-                if target and target != last:
+                if self.mode == "auto" and target and target != last:
                     self.obs.call("set_current_program_scene", target)
                     self.log("dir", f"сцена -> {target}")
                     last = target
