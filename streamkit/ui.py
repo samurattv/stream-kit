@@ -4,12 +4,14 @@ import datetime
 import queue
 import re
 import tkinter as tk
+import webbrowser
 from tkinter import ttk, messagebox
 
 import sounddevice as sd
 
 from . import config as cfg_store
 from .config import DEFAULTS
+from .avatar import Avatar, GLASSES, HATS, HOODIES
 from .obs import ObsLink
 from .workers import ChatTTS, Clipper, Director, ValorantClipper
 
@@ -68,7 +70,7 @@ class RegionPicker(tk.Toplevel):
 COLORS = {
     "bg": "#1b1d23", "panel": "#23262e", "text": "#dfe3ea",
     "chat": "#7fb2ff", "tts": "#9d8cff", "dir": "#5fd39a",
-    "clip": "#ffc861", "val": "#ff9d6e", "err": "#ff7b72", "sys": "#8b93a3",
+    "clip": "#ffc861", "val": "#ff9d6e", "avatar": "#e6a0c4", "err": "#ff7b72", "sys": "#8b93a3",
 }
 
 
@@ -112,6 +114,7 @@ class App(tk.Tk):
         self.tab_main(nb)
         self.tab_lol(nb)
         self.tab_valorant(nb)
+        self.tab_avatar(nb)
 
         # --- нижняя панель со стартом
         bar = tk.Frame(self, bg=COLORS["panel"], pady=8, padx=10)
@@ -280,6 +283,87 @@ class App(tk.Tk):
         ttk.Checkbutton(page, text="Режим проверки — писать в лог, но не сохранять",
                         variable=var).pack(anchor="w", pady=(12, 0))
 
+    def tab_avatar(self, nb):
+        page = tk.Frame(nb, bg=COLORS["panel"], padx=12, pady=10)
+        nb.add(page, text="Аватар")
+
+        var = tk.BooleanVar(value=bool(self.cfg["enable_avatar"]))
+        self.vars["enable_avatar"] = var
+        ttk.Checkbutton(page, text="Аватар-енот", variable=var).pack(anchor="w")
+        ttk.Label(page, justify="left",
+                  text="Енот повторяет твоё лицо с веб-камеры. Открой страницу в Chrome,\n"
+                       "разреши камеру и захвати окно в PRISM (фон — хромакей)."
+                  ).pack(anchor="w", pady=(6, 10))
+
+        row = tk.Frame(page, bg=COLORS["panel"])
+        row.pack(anchor="w")
+        ttk.Label(row, text="Порт:").pack(side="left")
+        self.vars["avatar_port"] = tk.StringVar(value=str(self.cfg["avatar_port"]))
+        tk.Entry(row, textvariable=self.vars["avatar_port"], width=7, bg=COLORS["bg"],
+                 fg=COLORS["text"], relief="flat",
+                 insertbackground=COLORS["text"]).pack(side="left", padx=(6, 12))
+        for text, cmd in (("Открыть аватар", self.open_avatar),
+                          ("Скопировать ссылку", self.copy_avatar_url)):
+            tk.Button(row, text=text, command=cmd, bg=COLORS["bg"], fg=COLORS["text"],
+                      relief="flat", cursor="hand2", activebackground=COLORS["panel"]
+                      ).pack(side="left", padx=(0, 8))
+
+        box = ttk.LabelFrame(page, text="Одежда", padding=8)
+        box.pack(fill="x", pady=(12, 0))
+        look = self.cfg.get("avatar_look") or {}
+        self.look_vars = {}
+        row = tk.Frame(box, bg=COLORS["panel"])
+        row.pack(anchor="w")
+        for label, key, options, default in (
+                ("Худи", "hoodie", HOODIES, "indigo"),
+                ("Шапка", "hat", ["none"] + HATS, "none"),
+                ("Очки", "glasses", ["none"] + GLASSES, "none")):
+            ttk.Label(row, text=label).pack(side="left", padx=(0, 4))
+            v = tk.StringVar(value=look.get(key, default))
+            self.look_vars[key] = v
+            cb = ttk.Combobox(row, textvariable=v, values=options, width=9, state="readonly")
+            cb.pack(side="left", padx=(0, 12))
+            cb.bind("<<ComboboxSelected>>", lambda e: self.apply_look())
+        row = tk.Frame(box, bg=COLORS["panel"])
+        row.pack(anchor="w", pady=(8, 0))
+        for label, key, default in (("Шарф", "scarf", False),):
+            v = tk.BooleanVar(value=bool(look.get(key, default)))
+            self.look_vars[key] = v
+            ttk.Checkbutton(row, text=label, variable=v,
+                            command=self.apply_look).pack(side="left", padx=(0, 14))
+
+        var = tk.BooleanVar(value=bool(self.cfg["avatar_chat"]))
+        self.vars["avatar_chat"] = var
+        ttk.Checkbutton(page, text="Команды из чата: !шапка, !очки, !худи, !шарф, "
+                                   "!образ (нужна озвучка чата)",
+                        variable=var).pack(anchor="w", pady=(12, 0))
+
+    def avatar_url(self):
+        try:
+            port = int(self.vars["avatar_port"].get())
+        except ValueError:
+            port = int(self.cfg["avatar_port"])
+        return f"http://127.0.0.1:{port}/index.html?ws={port + 1}"
+
+    def open_avatar(self):
+        if not any(isinstance(w, Avatar) for w in self.workers):
+            self.log("err", "аватар не запущен: включи галочку и нажми СТАРТ")
+            return
+        webbrowser.open(self.avatar_url())
+
+    def copy_avatar_url(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.avatar_url())
+        self.log("sys", f"ссылка скопирована: {self.avatar_url()}")
+
+    def apply_look(self):
+        """Выбор в списках «Одежда» — сразу на енота и в настройки."""
+        look = {k: v.get() for k, v in self.look_vars.items()}
+        self.cfg["avatar_look"] = look
+        avatar = next((w for w in self.workers if isinstance(w, Avatar)), None)
+        if avatar:
+            avatar.set_look(look)
+
     def region_text(self):
         r = self.cfg.get("val_region") or []
         if len(r) == 4:
@@ -349,7 +433,18 @@ class App(tk.Tk):
             self.log_box.insert("end", f"{stamp}  {text}\n", tag)
             self.log_box.see("end")
             self.log_box.config(state="disabled")
+        self.sync_look()
         self.after(150, self.drain_log)
+
+    def sync_look(self):
+        """Команды из чата меняют образ — показываем это и в списках «Одежда»."""
+        avatar = next((w for w in self.workers if isinstance(w, Avatar)), None)
+        if not avatar or not hasattr(self, "look_vars"):
+            return
+        for key, var in self.look_vars.items():
+            value = avatar.look.get(key)
+            if value is not None and var.get() != value:
+                var.set(value)
 
     def load_scenes(self):
         self.collect()
@@ -407,8 +502,14 @@ class App(tk.Tk):
                 return
 
         self.workers = []
+        avatar = Avatar(self.cfg, self.log) if self.cfg["enable_avatar"] else None
+        if avatar:
+            self.workers.append(avatar)
         if self.cfg["enable_tts"]:
-            self.workers.append(ChatTTS(self.cfg, self.log))
+            tts = ChatTTS(self.cfg, self.log)
+            if avatar:
+                tts.on_command = avatar.handle_chat
+            self.workers.append(tts)
         if self.cfg["enable_director"]:
             self.workers.append(Director(self.cfg, self.log, self.obs))
         if self.cfg["enable_clipper"]:

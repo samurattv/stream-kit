@@ -42,6 +42,10 @@ DEFAULTS = {
     "enable_tts": True,
     "enable_director": True,
     "enable_clipper": True,
+    "enable_avatar": False,
+    "avatar_port": 8765,
+    "avatar_chat": True,
+    "avatar_look": {},
 }
 
 # процессы игр: (кусок имени процесса, роль)

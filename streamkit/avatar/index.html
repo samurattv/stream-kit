@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Енот-сосед</title>
+<style>
+  :root { --ui: rgba(14,15,30,.88); --line: #2c3052; --fg: #ece3d3; --muted: #9a97a8; --lamp: #ffb65c; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+  body.bg-green { background: #00ff00; }
+  body.bg-window { background: #191b31; }
+  canvas { display: block; width: 100vmin; height: 100vmin; margin: 0 auto; }
+  #ui { position: fixed; top: 12px; left: 12px; background: var(--ui); color: var(--fg); border: 1px solid var(--line);
+        border-radius: 10px; padding: 12px 14px; font: 13px/1.45 system-ui, sans-serif; display: grid; gap: 8px; max-width: 300px; }
+  #ui b { font-weight: 600; }
+  #ui .row { display: flex; flex-wrap: wrap; gap: 6px; }
+  #ui button, #ui select { font: inherit; color: var(--fg); background: #1d2040; border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; cursor: pointer; max-width: 100%; }
+  #ui button:focus-visible, #ui select:focus-visible { outline: 2px solid var(--lamp); outline-offset: 1px; }
+  #status { color: var(--lamp); }
+  #ui small { color: var(--muted); }
+  video { display: none; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body class="bg-green">
+<canvas id="c" width="1080" height="1080"></canvas>
+<video id="v" playsinline muted></video>
+<div id="ui">
+  <b>Енот-сосед · аватар</b>
+  <div id="status">Запускаю камеру…</div>
+  <select id="cam" aria-label="Камера"><option value="">Камера по умолчанию</option></select>
+  <div class="row">
+    <button id="bBg">Фон: зелёный</button>
+    <button id="bMirror">Зеркало: вкл</button>
+    <button id="bCal">Калибровка</button>
+  </div>
+  <div class="row">
+    <select id="selHoodie" aria-label="Худи"></select>
+    <select id="selHat" aria-label="Шапка"></select>
+    <select id="selGlasses" aria-label="Очки"></select>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="chkScarf"> шарф</label>
+  </div>
+  <small>Смотри прямо в камеру и нажми «Калибровка» (или C). H прячет эту панель, B меняет фон.</small>
+</div>
+<script type="module">
+const MP = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21';
+const MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const video = document.getElementById('v');
+const statusEl = document.getElementById('status');
+const ui = document.getElementById('ui');
+const params = new URLSearchParams(location.search);
+const DEMO = params.has('demo');
+
+// ---------- settings ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('ts-raccoon-' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('ts-raccoon-' + k, JSON.stringify(v)); } catch {} }
+};
+const BGS = ['green', 'transparent', 'window'];
+const BG_NAMES = { green: 'зелёный', transparent: 'прозрачный', window: 'окно' };
+let bg = params.get('bg') || store.get('bg', 'green');
+let mirror = store.get('mirror', true);
+let cal = store.get('cal', { yaw: 0, pitch: 0, roll: 0 });
+if (params.has('hide')) ui.hidden = true;
+
+function applyBg() {
+  document.body.className = 'bg-' + bg;
+  document.getElementById('bBg').textContent = 'Фон: ' + BG_NAMES[bg];
+  store.set('bg', bg);
+}
+function applyMirror() { document.getElementById('bMirror').textContent = 'Зеркало: ' + (mirror ? 'вкл' : 'выкл'); store.set('mirror', mirror); }
+applyBg(); applyMirror();
+document.getElementById('bBg').onclick = () => { bg = BGS[(BGS.indexOf(bg) + 1) % BGS.length]; applyBg(); };
+document.getElementById('bMirror').onclick = () => { mirror = !mirror; applyMirror(); };
+document.getElementById('bCal').onclick = calibrate;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT') return;
+  const k = e.key.toLowerCase();
+  if (k === 'h' || k === 'р') ui.hidden = !ui.hidden;
+  if (k === 'b' || k === 'и') document.getElementById('bBg').click();
+  if (k === 'c' || k === 'с') calibrate();
+});
+
+// ---------- face state ----------
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const raw = { yaw: 0, pitch: 0, roll: 0 };
+const target = { yaw: 0, pitch: 0, roll: 0, blinkL: 0, blinkR: 0, jaw: 0, smile: 0, browUp: 0, browDown: 0, lookX: 0, lookY: 0, pucker: 0 };
+const cur = { ...target };
+let lastFace = 0;
+
+function calibrate() {
+  cal = { yaw: raw.yaw, pitch: raw.pitch, roll: raw.roll };
+  store.set('cal', cal);
+  flash('Нейтральная поза сохранена');
+}
+let flashUntil = 0, flashText = '';
+function flash(t) { flashText = t; flashUntil = performance.now() + 1800; }
+
+// ---------- tracking ----------
+let landmarker = null, stream = null;
+async function startCamera(deviceId) {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId }, width: 640, height: 480 } : { width: 640, height: 480 } });
+  video.srcObject = stream;
+  await video.play();
+  store.set('cam', deviceId || '');
+}
+async function listCams() {
+  const sel = document.getElementById('cam');
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  sel.innerHTML = '';
+  devs.forEach((d, i) => { const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || 'Камера ' + (i + 1); sel.appendChild(o); });
+  const active = stream?.getVideoTracks()[0]?.getSettings().deviceId;
+  if (active) sel.value = active;
+  sel.onchange = () => startCamera(sel.value).catch(e => statusEl.textContent = 'Камера не открылась: ' + e.message);
+}
+async function initTracking() {
+  try {
+    const vision = await import(MP + '/vision_bundle.mjs');
+    statusEl.textContent = 'Загружаю модель лица…';
+    const files = await vision.FilesetResolver.forVisionTasks(MP + '/wasm');
+    const opts = d => ({ baseOptions: { modelAssetPath: MODEL, delegate: d }, runningMode: 'VIDEO', numFaces: 1,
+                          outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true });
+    try { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('GPU')); }
+    catch { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('CPU')); }
+    statusEl.textContent = 'Жду разрешения на камеру…';
+    await startCamera(store.get('cam', ''));
+    await listCams();
+    statusEl.textContent = 'Работает. Посмотри в камеру.';
+  } catch (e) {
+    statusEl.textContent = 'Не вышло: ' + (e.message || e) + '. Показываю демо.';
+    console.error(e);
+  }
+}
+
+let lastVideoTime = -1;
+function track() {
+  if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  const res = landmarker.detectForVideo(video, performance.now());
+  const shapes = res.faceBlendshapes?.[0]?.categories;
+  const m = res.facialTransformationMatrixes?.[0]?.data;
+  if (!shapes || !m) return;
+  lastFace = performance.now();
+  const s = {}; shapes.forEach(c => s[c.categoryName] = c.score);
+  // column-major 4x4 rotation → Euler
+  raw.pitch = Math.atan2(m[6], m[10]);
+  raw.yaw = Math.asin(clamp(-m[2], -1, 1));
+  raw.roll = Math.atan2(m[1], m[0]);
+  const sg = mirror ? -1 : 1;
+  target.yaw = clamp((raw.yaw - cal.yaw) * sg, -.6, .6);
+  target.pitch = clamp(raw.pitch - cal.pitch, -.45, .45);
+  target.roll = clamp((raw.roll - cal.roll) * sg, -.5, .5);
+  let bl = clamp((s.eyeBlinkLeft - .3) / .4), br = clamp((s.eyeBlinkRight - .3) / .4);
+  if (mirror) [bl, br] = [br, bl];
+  // link eyes when close, so a half-blink doesn't look like a wink
+  if (Math.abs(bl - br) < .35) bl = br = (bl + br) / 2;
+  target.blinkL = bl; target.blinkR = br;
+  target.jaw = clamp((s.jawOpen - .04) * 2.4);
+  target.smile = clamp(((s.mouthSmileLeft + s.mouthSmileRight) / 2 - .1) * 1.8);
+  target.pucker = clamp((s.mouthPucker - .2) * 1.6);
+  target.browUp = clamp((s.browInnerUp - .1) * 1.8);
+  target.browDown = clamp(((s.browDownLeft + s.browDownRight) / 2 - .1) * 2);
+  const lx = ((s.eyeLookOutLeft - s.eyeLookInLeft) + (s.eyeLookInRight - s.eyeLookOutRight)) / 2;
+  const ly = ((s.eyeLookUpLeft + s.eyeLookUpRight) - (s.eyeLookDownLeft + s.eyeLookDownRight)) / 2;
+  target.lookX = clamp(lx * (mirror ? -1.5 : 1.5), -1, 1);
+  target.lookY = clamp(-ly * 1.5, -1, 1);
+}
+
+// Idle / demo motion when there is no face in view.
+let nextBlink = 2;
+function idle(t) {
+  const demo = DEMO || !landmarker;
+  target.yaw = demo ? Math.sin(t * .5) * .32 : 0;
+  target.pitch = demo ? Math.sin(t * .37 + 1) * .12 : 0;
+  target.roll = demo ? Math.sin(t * .29) * .1 : 0;
+  target.lookX = demo ? Math.sin(t * .8) * .6 : 0;
+  target.lookY = 0;
+  const talking = demo && Math.sin(t * .4) > 0;
+  target.jaw = talking ? clamp(Math.abs(Math.sin(t * 9) * Math.sin(t * 3.7)) * 1.1) : 0;
+  target.smile = demo ? clamp(Math.sin(t * .23 + 2) * 1.2) : .15;
+  target.browUp = demo ? clamp(Math.sin(t * .6 + 1) - .3) : 0;
+  target.browDown = 0; target.pucker = 0;
+  if (t > nextBlink) { target.blinkL = target.blinkR = 1; if (t > nextBlink + .12) { nextBlink = t + 2.5 + Math.random() * 3; } }
+  else target.blinkL = target.blinkR = 0;
+}
+
+// ---------- character: енот-сосед ----------
+const COL = {
+  fur: '#a29aa8', furShade: '#7f7788', furLight: '#f1eae2', mask: '#3a3342', ink: '#28222f',
+  earIn: '#4f4658', stripe: '#6d6577',
+  iris: '#e8983c', irisDark: '#9c5718', nose: '#28222f',
+  mouth: '#5a2330', tongue: '#ec7f83', blush: 'rgba(240,120,125,.38)', lid: '#f1e8dc',
+  hoodie: '#3a4170', hoodieDark: '#2a3058', hoodieLight: '#4b5490', string: '#ece3d3',
+  phones: '#1c1e33', led: '#ffb65c', scarf: '#c4553b', scarfDark: '#9a3d2a'
+};
+const CX = 540, HEAD_Y = 640, RX = 215, RY = 178;
+const INK = 7;
+
+// ---------- гардероб ----------
+const HOODIES = {
+  indigo: { name: 'индиго', hoodie: '#3a4170', hoodieDark: '#2a3058', hoodieLight: '#4b5490' },
+  red:    { name: 'красное', hoodie: '#a8403a', hoodieDark: '#7e2c28', hoodieLight: '#c25a52' },
+  green:  { name: 'зелёное', hoodie: '#3f7a56', hoodieDark: '#2c5a3e', hoodieLight: '#56966f' },
+  orange: { name: 'оранжевое', hoodie: '#d0782f', hoodieDark: '#a35a1f', hoodieLight: '#e7924a' },
+  black:  { name: 'чёрное', hoodie: '#34343c', hoodieDark: '#232329', hoodieLight: '#494953' },
+};
+const HATS = { none: 'без шапки', beanie: 'бини', crown: 'корона' };
+const GLASSES = { none: 'без очков', round: 'круглые', sun: 'тёмные' };
+const DEFAULT_LOOK = { hoodie: 'indigo', hat: 'none', glasses: 'none', scarf: false };
+const look = { ...DEFAULT_LOOK };
+for (const [k, v] of Object.entries(store.get('look', {}))) if (k in DEFAULT_LOOK) look[k] = v;
+
+function applyLook(patch, save = true) {
+  if (patch) {
+    if (patch.hoodie in HOODIES) look.hoodie = patch.hoodie;
+    if (patch.hat in HATS) look.hat = patch.hat;
+    if (patch.glasses in GLASSES) look.glasses = patch.glasses;
+    if ('scarf' in patch) look.scarf = !!patch.scarf;
+  }
+  if (!(look.hoodie in HOODIES)) look.hoodie = DEFAULT_LOOK.hoodie;
+  Object.assign(COL, HOODIES[look.hoodie]);
+  if (save) store.set('look', look);
+  syncLookUi();
+}
+window.setLook = applyLook;
+window.getLook = () => ({ ...look });
+const ears = [{ a: 0, v: 0 }, { a: 0, v: 0 }];
+let prevYaw = 0, prevRoll = 0, prevPitch = 0;
+
+function proj(ax, ay, rx = RX * .9, ry = RY * .9) {
+  const a = ax + cur.yaw, b = ay + cur.pitch * .8;
+  return { x: rx * Math.sin(a), y: ry * Math.sin(b), f: Math.max(.2, Math.cos(a)) };
+}
+function ink(w = INK) { ctx.strokeStyle = COL.ink; ctx.lineWidth = w; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke(); }
+
+function drawBackground() {
+  ctx.clearRect(0, 0, 1080, 1080);
+  if (bg === 'green') { ctx.fillStyle = '#00ff00'; ctx.fillRect(0, 0, 1080, 1080); }
+  if (bg === 'window') {
+    ctx.fillStyle = '#191b31'; ctx.fillRect(0, 0, 1080, 1080);
+    const x = 120, y = 70, w = 840, h = 960;
+    const g = ctx.createLinearGradient(0, y, 0, y + h);
+    g.addColorStop(0, '#ffe2aa'); g.addColorStop(.6, '#ffb65c'); g.addColorStop(1, '#e08e3c');
+    ctx.save(); ctx.shadowColor = 'rgba(255,182,92,.6)'; ctx.shadowBlur = 60;
+    ctx.fillStyle = g; ctx.fillRect(x, y, w, h); ctx.restore();
+    ctx.fillStyle = 'rgba(40,25,30,.85)';
+    ctx.fillRect(x + w / 2 - 7, y, 14, h * .32); ctx.fillRect(x, y + h * .32 - 7, w, 14);
+    ctx.strokeStyle = '#2b2f4d'; ctx.lineWidth = 18; ctx.strokeRect(x, y, w, h);
+  }
+}
+
+function drawBody(t) {
+  const sway = cur.yaw * 22, breath = Math.sin(t * 1.6) * 4;
+  const top = 800 - breath;
+  // hoodie body
+  ctx.beginPath();
+  ctx.moveTo(CX - 420 + sway, 1090);
+  ctx.bezierCurveTo(CX - 410 + sway, top + 60, CX - 320 + sway, top, CX - 150 + sway, top - 10);
+  ctx.lineTo(CX + 150 + sway, top - 10);
+  ctx.bezierCurveTo(CX + 320 + sway, top, CX + 410 + sway, top + 60, CX + 420 + sway, 1090);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, top, 0, 1080);
+  g.addColorStop(0, COL.hoodieLight); g.addColorStop(1, COL.hoodie);
+  ctx.fillStyle = g; ctx.fill(); ink();
+  // arm creases
+  ctx.beginPath(); ctx.moveTo(CX - 270 + sway, top + 120); ctx.quadraticCurveTo(CX - 255 + sway, top + 220, CX - 268 + sway, 1080); ink(5);
+  ctx.beginPath(); ctx.moveTo(CX + 270 + sway, top + 120); ctx.quadraticCurveTo(CX + 255 + sway, top + 220, CX + 268 + sway, 1080); ink(5);
+  // hood resting behind the neck
+  ctx.beginPath(); ctx.ellipse(CX + sway * .8, top - 6, 210, 74, 0, Math.PI, 0); ctx.fillStyle = COL.hoodieDark; ctx.fill(); ink();
+  // neck fur
+  ctx.beginPath(); ctx.ellipse(CX + sway * .7, top - 10, 120, 48, 0, 0, Math.PI * 2); ctx.fillStyle = COL.furShade; ctx.fill();
+  // collar opening
+  ctx.beginPath(); ctx.moveTo(CX - 150 + sway, top - 8); ctx.quadraticCurveTo(CX + sway, top + 90, CX + 150 + sway, top - 8);
+  ctx.lineTo(CX + 150 + sway, top + 10); ctx.quadraticCurveTo(CX + sway, top + 110, CX - 150 + sway, top + 10); ctx.closePath();
+  ctx.fillStyle = COL.hoodie; ctx.fill(); ink(5);
+  if (look.scarf) {
+    const sx = CX + sway * .8, tail = Math.sin(t * 1.4) * 5 - cur.yaw * 14;
+    ctx.beginPath(); ctx.moveTo(sx + 52, top + 60);
+    ctx.lineTo(sx + 128 + tail, top + 265); ctx.lineTo(sx + 52 + tail, top + 285); ctx.lineTo(sx - 10, top + 90); ctx.closePath();
+    ctx.fillStyle = COL.scarfDark; ctx.fill(); ink(5);
+    ctx.beginPath(); ctx.moveTo(sx - 190, top - 6); ctx.quadraticCurveTo(sx, top + 125, sx + 190, top - 6);
+    ctx.lineTo(sx + 186, top + 44); ctx.quadraticCurveTo(sx, top + 178, sx - 186, top + 44); ctx.closePath();
+    ctx.fillStyle = COL.scarf; ctx.fill(); ink();
+    ctx.save(); ctx.clip(); ctx.strokeStyle = COL.scarfDark; ctx.lineWidth = 8;
+    for (let k = -4; k <= 4; k++) { ctx.beginPath(); ctx.moveTo(sx + k * 46 - 10, top - 20); ctx.lineTo(sx + k * 46 + 16, top + 200); ctx.stroke(); }
+    ctx.restore();
+  }
+  // drawstrings
+  for (const s of [-1, 1]) {
+    const x0 = CX + s * 60 + sway, y0 = top + 70;
+    const swing = Math.sin(t * 1.3 + s) * 4 - cur.yaw * 18;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo(x0 + swing * .5, y0 + 80, x0 + swing, y0 + 150);
+    ctx.strokeStyle = COL.string; ctx.lineWidth = 8; ctx.stroke();
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x0 + swing - 7, y0 + 146, 14, 26, 5) : ctx.rect(x0 + swing - 7, y0 + 146, 14, 26);
+    ctx.fillStyle = COL.ink; ctx.fill();
+  }
+}
+
+// Fluffy head outline: soft tufts on the cheeks, smooth crown.
+function headPath() {
+  const N = 40, pts = [];
+  for (let i = 0; i < N; i++) {
+    const a = i / N * Math.PI * 2;
+    const c = Math.cos(a), s = Math.sin(a);
+    const cheek = Math.max(0, Math.abs(c) - .35) * (s > -.05 ? 1.3 : 0);
+    const chin = s > .55 ? .06 : 0;
+    const push = (i % 2 ? .16 * cheek + chin : 0);
+    const squash = s > 0 ? 1 - .1 * s : 1;
+    pts.push([c * RX * (1 + push), s * RY * squash * (1 + push * .6)]);
+  }
+  ctx.beginPath();
+  const mid = (p, q) => [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+  let m = mid(pts[N - 1], pts[0]); ctx.moveTo(m[0], m[1]);
+  for (let i = 0; i < N; i++) { const p = pts[i], q = mid(p, pts[(i + 1) % N]); ctx.quadraticCurveTo(p[0], p[1], q[0], q[1]); }
+  ctx.closePath();
+}
+
+function drawEar(i, s) {
+  const e = ears[i];
+  const dy = cur.yaw - prevYaw, dr = cur.roll - prevRoll;
+  // small secondary wobble only; the base never leaves the head outline
+  const tgt = -dr * 2.5 - dy * 2;
+  e.v += (tgt - e.a) * .2; e.v *= .7; e.a += e.v;
+  e.a = Math.max(-.18, Math.min(.18, e.a));
+  // anchor point sits on the outline of the head, sliding a little with the turn
+  const th = s * .66 + cur.yaw * .35;
+  const bx = RX * .97 * Math.sin(th), by = -RY * .97 * Math.cos(th);
+  const f = Math.max(.35, Math.cos(s * .9 + cur.yaw));
+  ctx.save();
+  ctx.translate(bx, by + 18);
+  ctx.rotate(th * .55 + e.a);
+  const p = { f };
+  const w = 66 * (.55 + .45 * p.f), h = 120;
+  const earShape = (k) => {
+    ctx.beginPath();
+    ctx.moveTo(-w * k, 10);
+    ctx.quadraticCurveTo(-w * k * .9, -h * k * .7, 0, -h * k);
+    ctx.quadraticCurveTo(w * k * .9, -h * k * .7, w * k, 10);
+    ctx.closePath();
+  };
+  earShape(1); ctx.fillStyle = COL.fur; ctx.fill(); ink();
+  earShape(.78); ctx.fillStyle = COL.furLight; ctx.fill();
+  ctx.save(); ctx.translate(0, 8); earShape(.56); ctx.fillStyle = COL.earIn; ctx.fill(); ctx.restore();
+  ctx.restore();
+}
+
+function drawHead(t) {
+  ctx.save();
+  ctx.translate(CX + cur.yaw * 26, HEAD_Y + cur.pitch * 30);
+  ctx.rotate(cur.roll);
+
+  drawEar(0, -1); drawEar(1, 1);
+
+  // head
+  headPath();
+  const g = ctx.createRadialGradient(-60 + cur.yaw * 80, -70, 30, 0, 10, RX * 1.15);
+  g.addColorStop(0, '#b9b2be'); g.addColorStop(.65, COL.fur); g.addColorStop(1, COL.furShade);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.save(); ctx.clip();
+
+  // white cheek ruff on lower sides
+  for (const s of [-1, 1]) {
+    const p = proj(s * 1.0, .55, RX, RY);
+    ctx.beginPath(); ctx.ellipse(p.x + s * 30, p.y + 10, 110 * (.5 + .5 * p.f), 80, s * .4, 0, Math.PI * 2);
+    ctx.fillStyle = COL.furLight; ctx.fill();
+  }
+  // dark forehead stripe
+  const st = proj(0, -.95, RX, RY), sb = proj(0, -.08);
+  ctx.beginPath();
+  ctx.moveTo(st.x - 34 * st.f, st.y - 20);
+  ctx.quadraticCurveTo(sb.x - 26 * sb.f, (st.y + sb.y) / 2, sb.x, sb.y);
+  ctx.quadraticCurveTo(sb.x + 26 * sb.f, (st.y + sb.y) / 2, st.x + 34 * st.f, st.y - 20);
+  ctx.fillStyle = COL.stripe; ctx.fill();
+
+  // white brow patches
+  for (const s of [-1, 1]) {
+    const p = proj(s * .44, -.42);
+    const lift = cur.browUp * 20 - cur.browDown * 12;
+    const tilt = (cur.browUp * .25 - cur.browDown * .3) * -s;
+    ctx.beginPath(); ctx.ellipse(p.x, p.y - lift, 56 * p.f, 22, tilt, 0, Math.PI * 2);
+    ctx.fillStyle = COL.furLight; ctx.fill();
+  }
+
+  // bandit mask
+  ctx.fillStyle = COL.mask;
+  for (const s of [-1, 1]) {
+    const p = proj(s * .44, .04);
+    ctx.beginPath(); ctx.ellipse(p.x + s * 12 * p.f, p.y + 6, 92 * p.f, 64, s * .28, 0, Math.PI * 2); ctx.fill();
+  }
+  const bp = proj(0, -.02);
+  ctx.beginPath(); ctx.ellipse(bp.x, bp.y, 60 * bp.f, 30, 0, 0, Math.PI * 2); ctx.fill();
+
+  // muzzle
+  const mz = proj(0, .5);
+  ctx.beginPath(); ctx.ellipse(mz.x, mz.y, 118 * (.6 + .4 * mz.f), 74, 0, 0, Math.PI * 2);
+  ctx.fillStyle = COL.furLight; ctx.fill();
+  ctx.restore();
+  headPath(); ink();
+
+  drawEyes();
+
+  // blush
+  for (const s of [-1, 1]) {
+    const p = proj(s * .5, .48);
+    ctx.fillStyle = COL.blush;
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, 24 * p.f, 13, 0, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // nose
+  const n = proj(0, .32);
+  ctx.beginPath();
+  ctx.moveTo(n.x - 24 * n.f, n.y - 10);
+  ctx.quadraticCurveTo(n.x, n.y - 18, n.x + 24 * n.f, n.y - 10);
+  ctx.quadraticCurveTo(n.x + 20 * n.f, n.y + 12, n.x, n.y + 16);
+  ctx.quadraticCurveTo(n.x - 20 * n.f, n.y + 12, n.x - 24 * n.f, n.y - 10);
+  ctx.fillStyle = COL.nose; ctx.fill();
+  ctx.beginPath(); ctx.ellipse(n.x - 7 * n.f, n.y - 7, 8 * n.f, 4, -.2, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.fill();
+
+  drawMouth(n);
+  drawGlasses();
+  drawHat();
+  ctx.restore();
+  prevYaw = cur.yaw; prevRoll = cur.roll; prevPitch = cur.pitch;
+}
+
+function drawEyes() {
+  const happy = cur.smile > .6;
+  for (const s of [-1, 1]) {
+    const p = proj(s * .42, .04);
+    const blink = s < 0 ? cur.blinkL : cur.blinkR;
+    const w = 40 * p.f, H = 46, h = H * (1 - blink);
+    ctx.lineCap = 'round';
+    if (happy && blink < .7) {
+      ctx.beginPath(); ctx.moveTo(p.x - w, p.y + 10); ctx.quadraticCurveTo(p.x, p.y - 30, p.x + w, p.y + 10);
+      ctx.strokeStyle = COL.lid; ctx.lineWidth = 9; ctx.stroke();
+      continue;
+    }
+    if (h < 7) {
+      ctx.beginPath(); ctx.moveTo(p.x - w, p.y + 4); ctx.quadraticCurveTo(p.x, p.y + 20, p.x + w, p.y + 4);
+      ctx.strokeStyle = COL.lid; ctx.lineWidth = 8; ctx.stroke();
+      continue;
+    }
+    const cy = p.y + (H - h) * .5;
+    ctx.save();
+    ctx.beginPath(); ctx.ellipse(p.x, cy, w, h, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#fffaf2'; ctx.fill();
+    ctx.clip();
+    const lx = cur.lookX * w * .4, ly = cur.lookY * 12;
+    const ix = p.x + lx, iy = p.y + 4 + ly;
+    const ig = ctx.createRadialGradient(ix, iy + 8, 4, ix, iy, 32);
+    ig.addColorStop(0, '#ffd08a'); ig.addColorStop(.55, COL.iris); ig.addColorStop(1, COL.irisDark);
+    ctx.beginPath(); ctx.ellipse(ix, iy, 30 * p.f + 4, 32, 0, 0, Math.PI * 2); ctx.fillStyle = ig; ctx.fill();
+    ctx.beginPath(); ctx.ellipse(ix, iy, 15 * p.f + 3, 17, 0, 0, Math.PI * 2); ctx.fillStyle = COL.ink; ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(ix - 11 * p.f, iy - 12, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(ix + 10 * p.f, iy + 11, 4, 0, Math.PI * 2); ctx.fill();
+    // soft upper-lid shadow
+    ctx.fillStyle = 'rgba(58,51,66,.35)';
+    ctx.beginPath(); ctx.ellipse(p.x, cy - h, w * 1.2, 12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    ctx.beginPath(); ctx.ellipse(p.x, cy, w, h, 0, 0, Math.PI * 2); ink(4);
+    // lashes flick
+    ctx.beginPath(); ctx.moveTo(p.x + s * w * .85, cy - h * .55); ctx.lineTo(p.x + s * (w + 12), cy - h * .8); ink(5);
+  }
+}
+
+function drawMouth(n) {
+  const p = proj(0, .52);
+  const sm = cur.smile, open = cur.jaw;
+  const w = (30 + sm * 14 - cur.pucker * 12) * p.f;
+  // philtrum
+  ctx.beginPath(); ctx.moveTo(n.x, n.y + 16); ctx.lineTo(p.x, p.y - 4); ink(5);
+  if (open < .06) {
+    // little "ω" mouth
+    ctx.beginPath();
+    ctx.moveTo(p.x - w, p.y - 6 - sm * 8);
+    ctx.quadraticCurveTo(p.x - w * .5, p.y + 14 + sm * 6, p.x, p.y - 4);
+    ctx.quadraticCurveTo(p.x + w * .5, p.y + 14 + sm * 6, p.x + w, p.y - 6 - sm * 8);
+    ink(5);
+    return;
+  }
+  const h = 12 + open * 62, up = sm * 10;
+  const path = () => {
+    ctx.beginPath();
+    ctx.moveTo(p.x - w, p.y - 4 - up);
+    ctx.quadraticCurveTo(p.x - w * .5, p.y + 6, p.x, p.y - 4);
+    ctx.quadraticCurveTo(p.x + w * .5, p.y + 6, p.x + w, p.y - 4 - up);
+    ctx.quadraticCurveTo(p.x + w * 1.05, p.y + h, p.x, p.y + h);
+    ctx.quadraticCurveTo(p.x - w * 1.05, p.y + h, p.x - w, p.y - 4 - up);
+    ctx.closePath();
+  };
+  path(); ctx.fillStyle = COL.mouth; ctx.fill();
+  ctx.save(); ctx.clip();
+  ctx.fillStyle = COL.tongue;
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + h, w * .75, h * .5, 0, 0, Math.PI * 2); ctx.fill();
+  // tiny fangs
+  ctx.fillStyle = '#fffaf2';
+  for (const s of [-1, 1]) {
+    const fx = p.x + s * w * .45;
+    ctx.beginPath(); ctx.moveTo(fx - 7, p.y); ctx.lineTo(fx + 7, p.y); ctx.lineTo(fx, p.y + 13); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+  path(); ink(5);
+}
+
+function drawGlasses() {
+  if (look.glasses === 'none') return;
+  const sun = look.glasses === 'sun';
+  const eyesAt = [-1, 1].map(s => ({ s, p: proj(s * .42, .04) }));
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  // дужки и переносица
+  ctx.strokeStyle = COL.ink; ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(eyesAt[0].p.x + 50 * eyesAt[0].p.f, eyesAt[0].p.y - 2);
+  ctx.quadraticCurveTo((eyesAt[0].p.x + eyesAt[1].p.x) / 2, eyesAt[0].p.y - 16, eyesAt[1].p.x - 50 * eyesAt[1].p.f, eyesAt[1].p.y - 2); ctx.stroke();
+  for (const { s, p } of eyesAt) {
+    ctx.beginPath(); ctx.moveTo(p.x - s * 56 * p.f, p.y - 4); ctx.lineTo(p.x - s * (RX * .8), p.y - 14); ctx.stroke();
+  }
+  for (const { p } of eyesAt) {
+    const rx = 56 * p.f + 4, ry = 56;
+    ctx.beginPath(); ctx.ellipse(p.x, p.y + 2, rx, ry, 0, 0, Math.PI * 2);
+    if (sun) { ctx.fillStyle = 'rgba(24,22,34,.9)'; ctx.fill(); }
+    else { ctx.fillStyle = 'rgba(255,255,255,.07)'; ctx.fill(); }
+    ctx.strokeStyle = COL.ink; ctx.lineWidth = 9; ctx.stroke();
+    // блик
+    ctx.beginPath(); ctx.moveTo(p.x - rx * .55, p.y - ry * .35); ctx.quadraticCurveTo(p.x - rx * .3, p.y - ry * .65, p.x + rx * .05, p.y - ry * .62);
+    ctx.strokeStyle = 'rgba(255,255,255,' + (sun ? .45 : .6) + ')'; ctx.lineWidth = 6; ctx.stroke();
+  }
+}
+
+function drawHat() {
+  if (look.hat === 'none') return;
+  const top = -RY * .86;
+  if (look.hat === 'beanie') {
+    const cx = 0, base = top + 62;
+    ctx.beginPath(); ctx.moveTo(cx - 112, base); ctx.bezierCurveTo(cx - 118, base - 120, cx - 60, base - 150, cx, base - 150);
+    ctx.bezierCurveTo(cx + 60, base - 150, cx + 118, base - 120, cx + 112, base); ctx.closePath();
+    ctx.fillStyle = '#d9604a'; ctx.fill(); ink();
+    ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(0,0,0,.12)'; ctx.lineWidth = 6;
+    for (let k = -4; k <= 4; k++) { ctx.beginPath(); ctx.moveTo(cx + k * 26, base - 160); ctx.lineTo(cx + k * 30, base); ctx.stroke(); }
+    ctx.restore();
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(cx - 124, base - 6, 248, 42, 16) : ctx.rect(cx - 124, base - 6, 248, 42);
+    ctx.fillStyle = '#f1eae2'; ctx.fill(); ink(6);
+    ctx.beginPath(); ctx.arc(cx, base - 156, 26, 0, Math.PI * 2); ctx.fillStyle = '#f1eae2'; ctx.fill(); ink(6);
+  } else if (look.hat === 'crown') {
+    const cx = 0, base = top + 46, h = 78, w = 92;
+    ctx.beginPath(); ctx.moveTo(cx - w, base);
+    ctx.lineTo(cx - w - 6, base - h); ctx.lineTo(cx - w * .5, base - h * .45); ctx.lineTo(cx, base - h * 1.2);
+    ctx.lineTo(cx + w * .5, base - h * .45); ctx.lineTo(cx + w + 6, base - h); ctx.lineTo(cx + w, base); ctx.closePath();
+    const g = ctx.createLinearGradient(0, base - h * 1.2, 0, base);
+    g.addColorStop(0, '#ffe08a'); g.addColorStop(1, '#e0a53a');
+    ctx.fillStyle = g; ctx.fill(); ink();
+    for (const [x, c] of [[-w * .5, '#e8576a'], [0, '#5aa0e8'], [w * .5, '#5fd39a']]) {
+      ctx.beginPath(); ctx.arc(cx + x, base - 20, 10, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); ink(3);
+    }
+  }
+}
+
+// ---------- панель гардероба ----------
+function fillSelect(id, items, key) {
+  const sel = document.getElementById(id);
+  for (const k in items) { const o = document.createElement('option'); o.value = k; o.textContent = items[k].name || items[k]; sel.appendChild(o); }
+  sel.onchange = () => applyLook({ [key]: sel.value });
+}
+fillSelect('selHoodie', HOODIES, 'hoodie'); fillSelect('selHat', HATS, 'hat'); fillSelect('selGlasses', GLASSES, 'glasses');
+document.getElementById('chkScarf').onchange = e => applyLook({ scarf: e.target.checked });
+function syncLookUi() {
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('selHoodie', look.hoodie); set('selHat', look.hat); set('selGlasses', look.glasses);
+  const s = document.getElementById('chkScarf');
+  if (s) s.checked = look.scarf;
+}
+applyLook(null, false);
+
+// ---------- команды от StreamKit ----------
+// ?ws=8766 — порт, на котором StreamKit слушает команды. Сообщения: {"look": {"hat": "beanie"}}
+const WS_PORT = params.get('ws');
+function connectCommands() {
+  if (!WS_PORT) return;
+  let sock;
+  try { sock = new WebSocket('ws://127.0.0.1:' + WS_PORT); } catch { return setTimeout(connectCommands, 3000); }
+  sock.onmessage = ev => {
+    try { const m = JSON.parse(ev.data); if (m.look) applyLook(m.look); } catch (e) { console.error(e); }
+  };
+  sock.onclose = () => setTimeout(connectCommands, 3000);
+  sock.onerror = () => sock.close();
+}
+connectCommands();
+
+// ---------- loop ----------
+const SPEED = { blinkL: .55, blinkR: .55, jaw: .5, default: .22 };
+function frame(now) {
+  const t = now / 1000;
+  if (!DEMO) track();
+  if (DEMO || !landmarker || now - lastFace > 700) idle(t);
+  for (const k in target) cur[k] += (target[k] - cur[k]) * (SPEED[k] ?? SPEED.default);
+  drawBackground();
+  drawBody(t);
+  drawHead(t);
+  if (now < flashUntil && !ui.hidden) {
+    ctx.fillStyle = 'rgba(14,15,30,.85)'; ctx.fillRect(340, 1000, 400, 50);
+    ctx.fillStyle = '#ffb65c'; ctx.font = '600 22px system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(flashText, 540, 1033); ctx.textAlign = 'left';
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+if (DEMO) statusEl.textContent = 'Демо без камеры';
+else initTracking();
+</script>
+</body>
+</html>

@@ -34,6 +34,8 @@ jobs:
           --collect-all mss
           --collect-all sounddevice
           --collect-all obsws_python
+          --collect-all websockets
+          --add-data "streamkit/avatar;streamkit/avatar"
           --hidden-import psutil
           --hidden-import truststore
           run.py

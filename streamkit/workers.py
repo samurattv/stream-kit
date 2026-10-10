@@ -37,6 +37,7 @@ class ChatTTS(Worker):
         super().__init__(cfg, log, obs)
         self.queue = queue.Queue(maxsize=12)
         self.model = None
+        self.on_command = None      # сюда подключается аватар: on_command(user, текст)
 
     def download_model(self):
         """Качаем модель сами: torch.hub рисует прогресс в stderr, которого нет под pyw."""
@@ -128,6 +129,11 @@ class ChatTTS(Worker):
 
                         user = m.group("user").lower()
                         raw = m.group("text").strip()
+                        if raw[:1] == "!" and self.on_command:
+                            try:
+                                self.on_command(user, raw)
+                            except Exception as e:
+                                self.log("err", f"команда чата: {e}")
                         if user in IGNORED_USERS or raw[:1] in ("!", "/", "$"):
                             continue
                         now = time.time()

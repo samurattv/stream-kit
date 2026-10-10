@@ -5,3 +5,4 @@ psutil>=5.9
 obsws-python>=1.6
 truststore>=0.9
 torch>=2.0
+websockets>=12.0
