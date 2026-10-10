@@ -18,7 +18,7 @@ AVATAR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "avatar")
 
 # должны совпадать со списками в index.html
 HOODIES = ["indigo", "red", "green", "orange", "black"]
-HATS = ["beanie", "crown"]
+HATS = ["beanie", "cap", "crown"]
 GLASSES = ["round", "sun"]
 DEFAULT_LOOK = {"hoodie": "indigo", "hat": "none", "glasses": "none", "scarf": False}
 
@@ -29,6 +29,7 @@ ALIASES = {
     "оранжевое": "orange", "оранжевый": "orange",
     "чёрное": "black", "черное": "black", "чёрный": "black", "черный": "black",
     "бини": "beanie", "шапка": "beanie", "шапку": "beanie",
+    "кепка": "cap", "кепку": "cap", "бейсболка": "cap",
     "корона": "crown", "корону": "crown",
     "круглые": "round", "очки": "round",
     "тёмные": "sun", "темные": "sun", "солнцезащитные": "sun",
@@ -38,7 +39,7 @@ RESET_WORDS = {"сброс", "reset", "обычный", "по-умолчанию
 
 # слово команды -> что меняем
 COMMANDS = {
-    "шапка": "hat", "hat": "hat",
+    "шапка": "hat", "hat": "hat", "кепка": "hat", "cap": "hat",
     "очки": "glasses", "glasses": "glasses",
     "худи": "hoodie", "hoodie": "hoodie",
     "шарф": "scarf", "scarf": "scarf",
@@ -69,6 +70,8 @@ def parse_command(text, look):
         return None
     what = next(v for k, v in COMMANDS.items() if k.replace("ё", "е") == parts[0])
     arg = parts[1] if len(parts) > 1 else ""
+    if parts[0] in ("кепка", "cap") and not arg:
+        arg = "cap"              # «!кепка» сразу надевает кепку
     aliases = {k.replace("ё", "е"): v for k, v in ALIASES.items()}
 
     if what == "reset":
@@ -98,6 +101,11 @@ def parse_command(text, look):
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    # на некоторых Windows реестр отдаёт для этих типов не то, и браузер отказывается их грузить
+    extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
+                      ".mjs": "text/javascript", ".js": "text/javascript",
+                      ".wasm": "application/wasm", ".task": "application/octet-stream"}
+
     def log_message(self, *args):
         pass
 

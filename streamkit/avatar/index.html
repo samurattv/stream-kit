@@ -118,18 +118,29 @@ async function listCams() {
   if (active) sel.value = active;
   sel.onchange = () => startCamera(sel.value).catch(e => statusEl.textContent = 'Камера не открылась: ' + e.message);
 }
+// Библиотека и модель лица лежат рядом со страницей (папка mediapipe), интернет не нужен.
+// Если папки нет, берём с CDN.
+async function pickAssets() {
+  try {
+    const r = await fetch('mediapipe/face_landmarker.task', { method: 'HEAD' });
+    if (r.ok) return { lib: 'mediapipe', model: 'mediapipe/face_landmarker.task' };
+  } catch {}
+  return { lib: MP, model: MODEL };
+}
 async function initTracking() {
   try {
-    const vision = await import(MP + '/vision_bundle.mjs');
-    statusEl.textContent = 'Загружаю модель лица…';
-    const files = await vision.FilesetResolver.forVisionTasks(MP + '/wasm');
-    const opts = d => ({ baseOptions: { modelAssetPath: MODEL, delegate: d }, runningMode: 'VIDEO', numFaces: 1,
-                          outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true });
-    try { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('GPU')); }
-    catch { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('CPU')); }
+    // сначала камера: разрешение спрашивается сразу, а не после загрузки модели
     statusEl.textContent = 'Жду разрешения на камеру…';
     await startCamera(store.get('cam', ''));
     await listCams();
+    statusEl.textContent = 'Загружаю модель лица…';
+    const assets = await pickAssets();
+    const vision = await import(new URL(assets.lib + '/vision_bundle.mjs', location.href).href);
+    const files = await vision.FilesetResolver.forVisionTasks(assets.lib + '/wasm');
+    const opts = d => ({ baseOptions: { modelAssetPath: assets.model, delegate: d }, runningMode: 'VIDEO', numFaces: 1,
+                          outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true });
+    try { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('GPU')); }
+    catch { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('CPU')); }
     statusEl.textContent = 'Работает. Посмотри в камеру.';
   } catch (e) {
     statusEl.textContent = 'Не вышло: ' + (e.message || e) + '. Показываю демо.';
@@ -209,7 +220,7 @@ const HOODIES = {
   orange: { name: 'оранжевое', hoodie: '#d0782f', hoodieDark: '#a35a1f', hoodieLight: '#e7924a' },
   black:  { name: 'чёрное', hoodie: '#34343c', hoodieDark: '#232329', hoodieLight: '#494953' },
 };
-const HATS = { none: 'без шапки', beanie: 'бини', crown: 'корона' };
+const HATS = { none: 'без шапки', beanie: 'бини', cap: 'кепка', crown: 'корона' };
 const GLASSES = { none: 'без очков', round: 'круглые', sun: 'тёмные' };
 const DEFAULT_LOOK = { hoodie: 'indigo', hat: 'none', glasses: 'none', scarf: false };
 const look = { ...DEFAULT_LOOK };
@@ -320,13 +331,15 @@ function headPath() {
   ctx.closePath();
 }
 
-function drawEar(i, s) {
+function drawEar(i, s, step = true) {
   const e = ears[i];
-  const dy = cur.yaw - prevYaw, dr = cur.roll - prevRoll;
-  // small secondary wobble only; the base never leaves the head outline
-  const tgt = -dr * 2.5 - dy * 2;
-  e.v += (tgt - e.a) * .2; e.v *= .7; e.a += e.v;
-  e.a = Math.max(-.18, Math.min(.18, e.a));
+  if (step) {
+    const dy = cur.yaw - prevYaw, dr = cur.roll - prevRoll;
+    // small secondary wobble only; the base never leaves the head outline
+    const tgt = -dr * 2.5 - dy * 2;
+    e.v += (tgt - e.a) * .2; e.v *= .7; e.a += e.v;
+    e.a = Math.max(-.18, Math.min(.18, e.a));
+  }
   // anchor point sits on the outline of the head, sliding a little with the turn
   const th = s * .66 + cur.yaw * .35;
   const bx = RX * .97 * Math.sin(th), by = -RY * .97 * Math.cos(th);
@@ -536,16 +549,82 @@ function drawHat() {
   if (look.hat === 'none') return;
   const top = -RY * .86;
   if (look.hat === 'beanie') {
-    const cx = 0, base = top + 62;
-    ctx.beginPath(); ctx.moveTo(cx - 112, base); ctx.bezierCurveTo(cx - 118, base - 120, cx - 60, base - 150, cx, base - 150);
-    ctx.bezierCurveTo(cx + 60, base - 150, cx + 118, base - 120, cx + 112, base); ctx.closePath();
+    // бини обнимает всю макушку: купол от виска до виска, манжета изогнута по лбу,
+    // уши торчат сквозь шапку. Сдвигается вслед за поворотом головы.
+    ctx.save();
+    ctx.translate(Math.sin(cur.yaw) * RX * .22, cur.pitch * 18);
+    const W = 186, rim = -84, topY = -238;
+    ctx.beginPath(); ctx.moveTo(-W, rim);
+    ctx.bezierCurveTo(-W - 14, -170, -112, topY, 0, topY);
+    ctx.bezierCurveTo(112, topY, W + 14, -170, W, rim);
+    ctx.quadraticCurveTo(0, rim - 30, -W, rim); ctx.closePath();
     ctx.fillStyle = '#d9604a'; ctx.fill(); ink();
-    ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(0,0,0,.12)'; ctx.lineWidth = 6;
-    for (let k = -4; k <= 4; k++) { ctx.beginPath(); ctx.moveTo(cx + k * 26, base - 160); ctx.lineTo(cx + k * 30, base); ctx.stroke(); }
+    ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(0,0,0,.13)'; ctx.lineWidth = 7;
+    for (let k = -6; k <= 6; k++) {
+      ctx.beginPath(); ctx.moveTo(k * 11, topY - 4); ctx.quadraticCurveTo(k * 34, -170, k * 31, rim); ctx.stroke();
+    }
     ctx.restore();
-    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(cx - 124, base - 6, 248, 42, 16) : ctx.rect(cx - 124, base - 6, 248, 42);
+    ctx.restore();
+
+    drawEar(0, -1, false); drawEar(1, 1, false);
+
+    ctx.save();
+    ctx.translate(Math.sin(cur.yaw) * RX * .22, cur.pitch * 18);
+    const W2 = 192, y0 = -128, y1 = -72;
+    ctx.beginPath(); ctx.moveTo(-W2, y0 + 30);
+    ctx.quadraticCurveTo(0, y0 - 28, W2, y0 + 30);
+    ctx.lineTo(W2 - 6, y1 + 30); ctx.quadraticCurveTo(0, y1 - 28, -W2 + 6, y1 + 30); ctx.closePath();
     ctx.fillStyle = '#f1eae2'; ctx.fill(); ink(6);
-    ctx.beginPath(); ctx.arc(cx, base - 156, 26, 0, Math.PI * 2); ctx.fillStyle = '#f1eae2'; ctx.fill(); ink(6);
+    ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(0,0,0,.09)'; ctx.lineWidth = 5;
+    for (let k = -8; k <= 8; k++) { ctx.beginPath(); ctx.moveTo(k * 24, y0 - 50); ctx.lineTo(k * 24 + 4, y1 + 40); ctx.stroke(); }
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(0, topY - 6, 30, 0, Math.PI * 2); ctx.fillStyle = '#f1eae2'; ctx.fill(); ink(6);
+    ctx.restore();
+  } else if (look.hat === 'cap') {
+    // бейсболка: высокий купол, дырки под уши, ободок, козырёк-линза с тенью на лбу
+    const dx = Math.sin(cur.yaw) * RX * .22, dy = cur.pitch * 18;
+    const W = 184, rim = -92, topY = -248;
+    ctx.save(); ctx.translate(dx, dy);
+    ctx.beginPath(); ctx.moveTo(-W, rim);
+    ctx.bezierCurveTo(-W - 12, -186, -116, topY, 0, topY);
+    ctx.bezierCurveTo(116, topY, W + 12, -186, W, rim);
+    ctx.quadraticCurveTo(0, rim - 26, -W, rim); ctx.closePath();
+    const g = ctx.createLinearGradient(-W, topY, W, rim);
+    g.addColorStop(0, '#5a8ad0'); g.addColorStop(.55, '#3f6fb5'); g.addColorStop(1, '#2f5a9c');
+    ctx.fillStyle = g; ctx.fill(); ink();
+    ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(0,0,0,.18)'; ctx.lineWidth = 5;
+    for (const k of [-1, 0, 1]) { ctx.beginPath(); ctx.moveTo(0, topY - 2); ctx.quadraticCurveTo(k * 96, -170, k * 146, rim); ctx.stroke(); }
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(0, topY + 3, 12, 0, Math.PI * 2); ctx.fillStyle = '#2f548a'; ctx.fill(); ink(4);
+    // дырки под уши
+    const th0 = cur.yaw * .35;
+    for (const s of [-1, 1]) {
+      const th = s * .66 + th0, hx = RX * .97 * Math.sin(th), hy = -RY * .97 * Math.cos(th) + 4;
+      ctx.beginPath(); ctx.ellipse(hx, hy, 46, 17, th * .55, 0, Math.PI * 2);
+      ctx.fillStyle = '#22406e'; ctx.fill(); ink(4);
+    }
+    ctx.restore();
+
+    drawEar(0, -1, false); drawEar(1, 1, false);
+
+    ctx.save(); ctx.translate(dx, dy);
+    // ободок по низу купола закрывает основания ушей
+    ctx.beginPath(); ctx.moveTo(-W, rim - 26); ctx.quadraticCurveTo(0, rim - 52, W, rim - 26);
+    ctx.lineTo(W, rim + 3); ctx.quadraticCurveTo(0, rim - 24, -W, rim + 3); ctx.closePath();
+    ctx.fillStyle = '#2f548a'; ctx.fill(); ink(6);
+    // тень от козырька на лбу
+    ctx.beginPath(); ctx.ellipse(0, rim + 40, 150, 30, 0, 0, Math.PI * 2); ctx.fillStyle = 'rgba(30,20,40,.22)'; ctx.fill();
+    // козырёк
+    ctx.beginPath(); ctx.moveTo(-W - 6, rim + 2);
+    ctx.quadraticCurveTo(-W * .6, rim + 74, 0, rim + 78);
+    ctx.quadraticCurveTo(W * .6, rim + 74, W + 6, rim + 2);
+    ctx.quadraticCurveTo(0, rim - 20, -W - 6, rim + 2); ctx.closePath();
+    const bg2 = ctx.createLinearGradient(0, rim, 0, rim + 78);
+    bg2.addColorStop(0, '#3a66a8'); bg2.addColorStop(1, '#27487c');
+    ctx.fillStyle = bg2; ctx.fill(); ink(6);
+    ctx.beginPath(); ctx.moveTo(-W * .5, rim + 20); ctx.quadraticCurveTo(0, rim + 52, W * .5, rim + 20);
+    ctx.strokeStyle = 'rgba(255,255,255,.28)'; ctx.lineWidth = 5; ctx.stroke();
+    ctx.restore();
   } else if (look.hat === 'crown') {
     const cx = 0, base = top + 46, h = 78, w = 92;
     ctx.beginPath(); ctx.moveTo(cx - w, base);

@@ -334,7 +334,7 @@ class App(tk.Tk):
 
         var = tk.BooleanVar(value=bool(self.cfg["avatar_chat"]))
         self.vars["avatar_chat"] = var
-        ttk.Checkbutton(page, text="Команды из чата: !шапка, !очки, !худи, !шарф, "
+        ttk.Checkbutton(page, text="Команды из чата: !шапка, !кепка, !очки, !худи, !шарф, "
                                    "!образ (нужна озвучка чата)",
                         variable=var).pack(anchor="w", pady=(12, 0))
 
