@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Создание аккаунта — StreamKit{% endblock %}
+{% block body %}
+<h1>Привет, {{ u.username }}!</h1>
+<section>
+<p>Шаг 1 из 2: придумай пароль. Минимум 12 символов; лучше длинная фраза, которой ты нигде больше не пользуешься.</p>
+<form method="post" action="{{ url_for('invite_post', token=token) }}" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+  <label for="password">Пароль</label>
+  <input type="password" id="password" name="password" required minlength="12" maxlength="200" autocomplete="new-password">
+  <label for="password2">Повтори пароль</label>
+  <input type="password" id="password2" name="password2" required minlength="12" maxlength="200" autocomplete="new-password">
+  <button type="submit">Дальше</button>
+</form>
+</section>
+{% endblock %}

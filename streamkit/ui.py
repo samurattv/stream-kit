@@ -283,6 +283,15 @@ class App(ctk.CTk):
                       width=140, progress_color=ACCENT, button_color=ACCENT,
                       button_hover_color=ACCENT_HOVER, fg_color=LINE).pack(side="left")
 
+        body = self.card(page, "YouTube — чат трансляции")
+        r = self.row(body)
+        self.label(r, "Трансляция").pack(side="left", padx=(0, 8))
+        self.entry(r, "youtube_video_id", width=190)
+        self.label(r, "API-ключ").pack(side="left", padx=(0, 8))
+        self.entry(r, "youtube_api_key", width=190, show="•")
+        ctk.CTkLabel(body, text="ID или ссылка на трансляцию. Чат читается, пока эфир идёт.",
+                     font=self.f_small, text_color=TEXT2, anchor="w").pack(anchor="w", pady=(8, 0))
+
         body = self.card(page, "PRISM / OBS")
         r = self.row(body)
         self.label(r, "Хост").pack(side="left", padx=(0, 8))

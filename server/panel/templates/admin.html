@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Администрирование — StreamKit{% endblock %}
+{% block body %}
+<h1>Администрирование</h1>
+{% if link %}
+<section>
+  <h2>Приглашение для {{ link_user }}</h2>
+  <p class="mono">{{ link }}</p>
+  <p class="hint">Ссылка одноразовая и действует 24 часа. Отправь её только этому человеку и не показывай больше нигде: после обновления страницы она не повторится.</p>
+</section>
+{% endif %}
+<section>
+  <h2>Пользователи</h2>
+  {% for x in users %}
+  <div class="row">
+    <div>
+      <strong>{{ x.username }}</strong>{% if x.role == 'admin' %} <span class="hint">админ</span>{% endif %}<br>
+      <span class="hint">{% if not x.totp_enabled %}ещё не активировал аккаунт{% else %}YouTube: {{ 'есть' if x.has_yt else 'нет' }} · Twitch: {{ 'есть' if x.has_tw else 'нет' }}{% endif %}</span>
+    </div>
+    {% if x.id != session.uid %}
+    <form method="post" action="{{ url_for('admin_delete', uid=x.id) }}">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button class="ghost danger" type="submit">Удалить</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+<section>
+  <h2>Пригласить или сбросить доступ</h2>
+  <form method="post" action="{{ url_for('admin_invite') }}" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <label for="username">Логин (латиница, цифры, _; 3–24 символа)</label>
+    <input type="text" id="username" name="username" required maxlength="24" pattern="[a-z0-9_]{3,24}" autocapitalize="none">
+    <button type="submit">Создать ссылку</button>
+  </form>
+  <p class="hint">Если логин уже есть, у человека сбросятся пароль и 2FA, а ключи и адрес для OBS останутся.</p>
+</section>
+<section>
+  <h2>Журнал</h2>
+  <table>
+    {% for e in log %}<tr><td>{{ e.ts|ts }}</td><td>{{ e.username }}</td><td>{{ e.event }}</td><td>{{ e.ip }}</td></tr>{% endfor %}
+  </table>
+</section>
+<p><a href="{{ url_for('home') }}">Назад</a></p>
+{% endblock %}

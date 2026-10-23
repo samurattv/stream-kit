@@ -12,6 +12,8 @@ import ssl
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 import numpy as np
@@ -34,7 +36,7 @@ class Worker(threading.Thread):
 
 
 class ChatTTS(Worker):
-    """Читает чат Twitch и озвучивает его голосами Silero."""
+    """Читает чаты Twitch и YouTube и озвучивает их голосами Silero."""
 
     def __init__(self, cfg, log, obs=None):
         super().__init__(cfg, log, obs)
@@ -95,15 +97,21 @@ class ChatTTS(Worker):
         self.log("tts", "движок озвучки готов")
 
         threading.Thread(target=self.speak_loop, daemon=True).start()
+        if self.cfg.get("youtube_video_id", "").strip():
+            threading.Thread(target=self.youtube_loop, daemon=True).start()
         self.read_loop()
 
-    # --- чтение чата
+    # --- чтение чата Twitch
     def read_loop(self):
         channel = self.cfg["twitch_channel"].strip().lower()
         if not channel:
-            self.log("err", "не указан канал Twitch")
+            # озвучка может работать и только с YouTube: тогда просто ждём остановки
+            if not self.cfg.get("youtube_video_id", "").strip():
+                self.log("err", "не указан ни канал Twitch, ни трансляция YouTube")
+                return
+            while not self.stop_flag.wait(1):
+                pass
             return
-        last_seen = {}
 
         while not self.stop_flag.is_set():
             sock = None
@@ -145,6 +153,69 @@ class ChatTTS(Worker):
                     sock.close()
                 except Exception:
                     pass
+
+    # --- чтение чата YouTube (официальный Data API v3)
+    def youtube_api(self, path, **params):
+        params["key"] = self.cfg["youtube_api_key"].strip()
+        url = f"https://www.googleapis.com/youtube/v3/{path}?{urllib.parse.urlencode(params)}"
+        with urllib.request.urlopen(url, timeout=20) as resp:
+            return json.load(resp)
+
+    def youtube_loop(self):
+        video_id = self.cfg["youtube_video_id"].strip()
+        m = re.search(r"(?:v=|youtu\.be/|live/)([\w-]{11})", video_id)   # можно вставить ссылку
+        if m:
+            video_id = m.group(1)
+        if not self.cfg.get("youtube_api_key", "").strip():
+            self.log("err", "для чата YouTube нужен API-ключ")
+            return
+
+        chat_id, page_token, first = None, None, True
+        while not self.stop_flag.is_set():
+            wait = 10.0
+            try:
+                if not chat_id:
+                    data = self.youtube_api("videos", part="liveStreamingDetails", id=video_id)
+                    items = data.get("items") or []
+                    chat_id = (items[0].get("liveStreamingDetails", {})
+                               .get("activeLiveChatId") if items else None)
+                    if not chat_id:
+                        self.log("err", "у трансляции YouTube пока нет чата, жду")
+                        self.stop_flag.wait(15)
+                        continue
+                    self.log("chat", "подключился к чату YouTube")
+
+                params = {"liveChatId": chat_id, "part": "snippet,authorDetails",
+                          "maxResults": 200}
+                if page_token:
+                    params["pageToken"] = page_token
+                data = self.youtube_api("liveChat/messages", **params)
+                page_token = data.get("nextPageToken")
+                # квота API ограничена, поэтому опрашиваем не чаще раза в 8 секунд
+                wait = max(8.0, data.get("pollingIntervalMillis", 10000) / 1000)
+
+                # первая порция — история чата до подключения, её не озвучиваем
+                if not first:
+                    for item in data.get("items", []):
+                        if item["snippet"].get("type") != "textMessageEvent":
+                            continue
+                        user = item["authorDetails"]["displayName"].lower().lstrip("@")
+                        raw = item["snippet"].get("displayMessage", "").strip()
+                        self.handle_message(user, raw)
+                first = False
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="ignore")
+                if e.code == 403 and "quota" in body.lower():
+                    self.log("err", "квота YouTube API на сегодня закончилась")
+                    return
+                if e.code in (403, 404):
+                    chat_id, page_token, first = None, None, True   # чат закрыт: найдём заново
+                self.log("err", f"чат YouTube: HTTP {e.code}, повторю")
+                wait = 15
+            except Exception as e:
+                self.log("err", f"чат YouTube отвалился ({e}), повторю")
+                wait = 15
+            self.stop_flag.wait(wait)
 
     # --- разбор сообщения
     def _num(self, key, default):
