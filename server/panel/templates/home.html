@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Моя трансляция — StreamKit{% endblock %}
+{% block body %}
+<header class="top">
+  <h1>Привет, {{ u.username }}</h1>
+  <form method="post" action="{{ url_for('logout') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button class="ghost" type="submit">Выйти</button>
+  </form>
+</header>
+
+{% if notice == 'keys' %}<p class="ok">Ключи сохранены.</p>{% endif %}
+{% if notice == 'rotate' %}<p class="ok">Новый адрес для OBS создан. Старый больше не работает.</p>{% endif %}
+{% if notice == 'password' %}<p class="ok">Пароль изменён.</p>{% endif %}
+
+<section>
+  <h2>Настройки для OBS</h2>
+  <p class="hint">Вещание → Сервис «Пользовательский»</p>
+  <p>Сервер: <code>rtmp://{{ rtmp_host }}/u_{{ s.publish_token }}</code></p>
+  <p>Ключ потока: <code>stream</code> (любое слово)</p>
+  <p class="hint">Адрес сервера секретный: он и есть твой пароль на вещание. Не показывай его на стриме. Если он засветился, нажми кнопку ниже.</p>
+  <form method="post" action="{{ url_for('rotate') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button class="ghost" type="submit">Сменить адрес</button>
+  </form>
+</section>
+
+<section>
+  <h2>Куда отправлять эфир</h2>
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+  <form method="post" action="{{ url_for('keys') }}" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <label for="yt">Ключ потока YouTube {% if yt %}<span class="hint">(сейчас: {{ yt }})</span>{% endif %}</label>
+    <input type="password" id="yt" name="yt" maxlength="80" data-lpignore="true" data-1p-ignore data-bwignore placeholder="{{ 'оставь пустым, чтобы не менять' if yt else 'не задан' }}" autocomplete="new-password">
+    {% if yt %}<label><input type="checkbox" name="clear_yt" value="1">Удалить ключ YouTube</label>{% endif %}
+    <label for="tw">Ключ потока Twitch {% if tw %}<span class="hint">(сейчас: {{ tw }})</span>{% endif %}</label>
+    <input type="password" id="tw" name="tw" maxlength="80" data-lpignore="true" data-1p-ignore data-bwignore placeholder="{{ 'оставь пустым, чтобы не менять' if tw else 'не задан' }}" autocomplete="new-password">
+    {% if tw %}<label><input type="checkbox" name="clear_tw" value="1">Удалить ключ Twitch</label>{% endif %}
+    <button type="submit">Сохранить</button>
+  </form>
+  <p class="hint">YouTube: Studio → Трансляции → Ключ потока. Twitch: Creator Dashboard → Настройки → Трансляция. После сохранения ключи целиком не показываются. Ключ потока даёт право вещать на твой канал, поэтому никому его не присылай.</p>
+  {% if applied %}<p class="ok">Применено, можно вещать.</p>
+  {% elif apply_failed %}<p class="err">Не удалось применить настройки. Напиши администратору.</p>
+  {% else %}<p class="hint">Настройки применяются в течение нескольких секунд, обнови страницу.</p>{% endif %}
+</section>
+
+<p><a href="{{ url_for('password') }}">Сменить пароль</a>{% if u.role == 'admin' %} · <a href="{{ url_for('admin') }}">Администрирование</a>{% endif %}</p>
+{% endblock %}

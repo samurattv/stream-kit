@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Двухфакторная защита — StreamKit{% endblock %}
+{% block body %}
+<h1>Защита входа</h1>
+<section>
+<p>Шаг 2 из 2: добавь аккаунт в приложение-аутентификатор на телефоне (Google Authenticator, Aegis, Microsoft Authenticator, 2FAS и подобные). Выбери «Ввести ключ вручную» и введи:</p>
+<p class="mono">{{ secret }}</p>
+<p class="hint">Тип: по времени. Если на телефоне открыта эта страница, можно нажать <a href="{{ uri }}">на эту ссылку</a>. Сохрани ключ в надёжном месте: по нему можно восстановить коды на новом телефоне.</p>
+<form method="post" action="{{ url_for('invite_post', token=token) }}" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+  <label for="code">Текущий код из приложения</label>
+  <input type="text" id="code" name="code" required inputmode="numeric" maxlength="7" autocomplete="one-time-code">
+  <button type="submit">Подтвердить и войти</button>
+</form>
+</section>
+{% endblock %}
