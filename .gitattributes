@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# файлы для Linux-сервера всегда с LF, иначе скрипты и Dockerfile не запустятся
+*.sh text eol=lf
+Dockerfile text eol=lf
+server/docker/* text eol=lf
