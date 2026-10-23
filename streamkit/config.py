@@ -13,6 +13,8 @@ CLIP_LOG = "clips.log"
 
 DEFAULTS = {
     "twitch_channel": "",
+    "youtube_video_id": "",
+    "youtube_api_key": "",
     "ws_host": "localhost",
     "ws_port": 4455,
     "ws_password": "",
