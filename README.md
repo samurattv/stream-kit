@@ -18,17 +18,23 @@ Code signing is provided by SignPath Foundation, certificate by SignPath.
 
 ## Установка
 
+### Готовая сборка для Windows
+
+Скачай `StreamKit-windows.zip` из [последнего релиза](https://github.com/samurattv/stream-kit/releases/latest), распакуй в любую папку и запусти `StreamKit.exe`. Python не нужен.
+
+Модель озвучки (~100 МБ) скачается сама при первом запуске, настройки лежат в `config.json` рядом с программой. Сборка пока не подписана, поэтому Windows SmartScreen может предупредить о неизвестном издателе: нажми «Подробнее» → «Выполнить в любом случае».
+
+### Из исходников
+
 Нужен Python 3.10 или новее.
 
 ```bash
-git clone https://github.com/USERNAME/streamkit.git
-cd streamkit
+git clone https://github.com/samurattv/stream-kit.git
+cd stream-kit
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 python run.py
 ```
-
-Модель озвучки (~100 МБ) скачается сама при первом запуске.
 
 ## Настройка
 
@@ -61,9 +67,11 @@ python run.py
 streamkit/
 ├── config.py      настройки и config.json
 ├── textutils.py   подготовка сообщений чата к озвучке
+├── voices.py      голоса, эффекты и громкость озвучки
 ├── obs.py         связь с PRISM/OBS, переподключение при обрыве
-├── workers.py     фоновые модули, каждый в своём потоке
-└── ui.py          окно на tkinter
+├── workers.py     фоновые модули: чаты Twitch и YouTube, сцены, клипы
+├── avatar.py      сервер аватара и страница с трекингом лица
+└── ui.py          окно на customtkinter
 ```
 
 Каждый модуль — отдельный поток с флагом остановки. Связь с OBS общая, с автоматическим переподключением. Никаких внешних сервисов: всё работает на локальной машине.
