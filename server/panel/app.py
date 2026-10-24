@@ -284,33 +284,51 @@ def home():
     state, ts, msg = read_status()
     applied = state == "ok" and ts >= s["updated"]
     return render_template("home.html", u=g.user, s=s, yt=core.mask(s["yt_key"]),
-                           tw=core.mask(s["tw_key"]), rtmp_host=RTMP_HOST,
+                           tw=core.mask(s["tw_key"]), vk=core.mask(s["vk_key"]),
+                           rtmp_host=RTMP_HOST,
                            applied=applied, apply_failed=(state == "error" and ts >= s["updated"]),
                            apply_msg=msg, notice=request.args.get("ok"), error=None)
+
+
+def keys_error(s, message):
+    return render_template(
+        "home.html", u=g.user, s=s, yt=core.mask(s["yt_key"]), tw=core.mask(s["tw_key"]),
+        vk=core.mask(s["vk_key"]), rtmp_host=RTMP_HOST, applied=False, apply_failed=False,
+        apply_msg="", notice=None, error=message), 400
 
 
 @app.post("/keys")
 @login_required()
 def keys():
     s = get_stream(g.user["id"])
-    new = {"yt_key": s["yt_key"], "tw_key": s["tw_key"]}
-    for field, form, clear in (("yt_key", "yt", "clear_yt"), ("tw_key", "tw", "clear_tw")):
-        if request.form.get(clear):
+    new = {"yt_key": s["yt_key"], "tw_key": s["tw_key"],
+           "vk_url": s["vk_url"], "vk_key": s["vk_key"]}
+    if request.form.get("clear_vk"):
+        new["vk_url"] = new["vk_key"] = ""
+    vk_url = request.form.get("vk_url", "").strip()
+    if vk_url:
+        if not core.VK_URL_RE.fullmatch(vk_url):
+            return keys_error(s, "Адрес сервера VK должен выглядеть как rtmp://адрес/путь, "
+                                 "без пробелов и лишних символов.")
+        new["vk_url"] = vk_url
+    for field, form, clear in (("yt_key", "yt", "clear_yt"), ("tw_key", "tw", "clear_tw"),
+                               ("vk_key", "vk", None)):
+        if clear and request.form.get(clear):
             new[field] = ""
             continue
         value = request.form.get(form, "").strip()
         if value:
-            if not core.KEY_RE.fullmatch(value):
-                state, ts, msg = read_status()
-                return render_template(
-                    "home.html", u=g.user, s=s, yt=core.mask(s["yt_key"]),
-                    tw=core.mask(s["tw_key"]), rtmp_host=RTMP_HOST, applied=False,
-                    apply_failed=False, apply_msg="", notice=None,
-                    error="Ключ выглядит неверно: только буквы, цифры, «-» и «_», "
-                          "длиной от 8 до 80 символов. Скопируй его целиком."), 400
+            pattern = core.VK_KEY_RE if field == "vk_key" else core.KEY_RE
+            if not pattern.fullmatch(value):
+                return keys_error(s, "Ключ выглядит неверно: только буквы, цифры и знаки «-», «_» "
+                                     "(для VK ещё «.»), от 6 до 120 символов. Скопируй его целиком.")
             new[field] = value
-    db().execute("UPDATE streams SET yt_key=?, tw_key=?, updated=? WHERE user_id=?",
-                 (new["yt_key"], new["tw_key"], time.time(), g.user["id"]))
+    if bool(new["vk_url"]) != bool(new["vk_key"]):
+        return keys_error(s, "Для VK Live нужны и адрес сервера, и ключ потока.")
+    db().execute("""UPDATE streams SET yt_key=?, tw_key=?, vk_url=?, vk_key=?, updated=?
+                    WHERE user_id=?""",
+                 (new["yt_key"], new["tw_key"], new["vk_url"], new["vk_key"], time.time(),
+                  g.user["id"]))
     core.audit(db(), g.user["username"], "keys_changed", client_ip())
     db().commit()
     core.touch_trigger()

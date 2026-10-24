@@ -99,6 +99,8 @@ class ChatTTS(Worker):
         threading.Thread(target=self.speak_loop, daemon=True).start()
         if self.cfg.get("youtube_video_id", "").strip():
             threading.Thread(target=self.youtube_loop, daemon=True).start()
+        if self.cfg.get("vk_channel", "").strip():
+            threading.Thread(target=self.vk_loop, daemon=True).start()
         self.read_loop()
 
     # --- чтение чата Twitch
@@ -106,8 +108,9 @@ class ChatTTS(Worker):
         channel = self.cfg["twitch_channel"].strip().lower()
         if not channel:
             # озвучка может работать и только с YouTube: тогда просто ждём остановки
-            if not self.cfg.get("youtube_video_id", "").strip():
-                self.log("err", "не указан ни канал Twitch, ни трансляция YouTube")
+            if not (self.cfg.get("youtube_video_id", "").strip()
+                    or self.cfg.get("vk_channel", "").strip()):
+                self.log("err", "не указан ни один чат: Twitch, YouTube или VK Live")
                 return
             while not self.stop_flag.wait(1):
                 pass
@@ -216,6 +219,87 @@ class ChatTTS(Worker):
                 self.log("err", f"чат YouTube отвалился ({e}), повторю")
                 wait = 15
             self.stop_flag.wait(wait)
+
+    # --- чат VK Видео Live (неофициально: тот же websocket, что использует сайт)
+    VK_SITE = "https://live.vkvideo.ru/"
+    VK_ORIGIN = "https://live.vkvideo.ru"      # без слэша на конце, иначе сервер отвечает 403
+    VK_WS = "wss://pubsub.live.vkvideo.ru/connection/websocket?cf_protocol_version=v2"
+    VK_CHANNEL_API = "https://api.live.vkvideo.ru/v1/blog/{}/public_video_stream/chat/user/"
+    VK_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StreamKit"
+
+    def vk_get(self, url):
+        req = urllib.request.Request(url, headers={"User-Agent": self.VK_UA})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+
+    @staticmethod
+    def vk_channel_name(raw):
+        """Принимает имя канала или ссылку на него и возвращает имя."""
+        raw = raw.strip().rstrip("/")
+        m = re.search(r"vkvideo\.ru/([\w.\-]+)", raw)
+        return (m.group(1) if m else raw).lower()
+
+    @staticmethod
+    def vk_message(push):
+        """Достаёт (ник, текст) из сообщения чата VK Live; для служебных событий возвращает None."""
+        try:
+            pub = push["push"]["pub"]["data"]
+            if pub.get("type") != "message":
+                return None
+            msg = pub["data"]
+            user = str(msg["author"]["displayName"]).lower().lstrip("@")
+            parts = []
+            for part in msg.get("data", []):
+                if part.get("type") != "text" or not part.get("content"):
+                    continue
+                content = part["content"]
+                try:                                # текст приходит как JSON-массив ["текст", ...]
+                    decoded = json.loads(content)
+                    content = decoded[0] if isinstance(decoded, list) and decoded else content
+                except ValueError:
+                    pass
+                if isinstance(content, str):
+                    parts.append(content)
+            text = " ".join(parts).strip()
+            return (user, text) if user and text else None
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+    def vk_loop(self):
+        from websockets.sync.client import connect
+        name = self.vk_channel_name(self.cfg["vk_channel"])
+        while not self.stop_flag.is_set():
+            try:
+                page = self.vk_get(self.VK_SITE)
+                m = re.search(r'<script[^>]*id="app-config"[^>]*>(.*?)</script>', page, re.S)
+                token = json.loads(m.group(1))["websocket"]["token"]
+                info = json.loads(self.vk_get(self.VK_CHANNEL_API.format(urllib.parse.quote(name))))
+                channel_id = info["data"]["owner"]["id"]
+
+                with connect(self.VK_WS, origin=self.VK_ORIGIN, user_agent_header=self.VK_UA,
+                             open_timeout=15) as ws:
+                    ws.send(json.dumps({"connect": {"token": token, "name": "js"}, "id": 1}))
+                    ws.send(json.dumps({"subscribe": {"channel": f"channel-chat:{channel_id}"},
+                                        "id": 2}))
+                    self.log("chat", f"подключился к чату VK Live: {name}")
+                    while not self.stop_flag.is_set():
+                        try:
+                            raw = ws.recv(timeout=5)
+                        except TimeoutError:
+                            continue
+                        if raw.strip() == "{}":     # пинг сервера, на него надо отвечать
+                            ws.send("{}")
+                            continue
+                        for line in raw.splitlines():
+                            if not line.strip():
+                                continue
+                            parsed = self.vk_message(json.loads(line))
+                            if parsed:
+                                self.handle_message(*parsed)
+            except Exception as e:
+                if not self.stop_flag.is_set():
+                    self.log("err", f"чат VK Live отвалился ({e}), повторю через 10 секунд")
+                    self.stop_flag.wait(10)
 
     # --- разбор сообщения
     def _num(self, key, default):

@@ -29,10 +29,12 @@ APP = """application u_{token} {{
 
 def render(db):
     out = ["# Файл создан автоматически (apply.py), руками не править.\n"]
-    for row in db.execute("""SELECT u.username, s.publish_token, s.yt_key, s.tw_key
+    for row in db.execute("""SELECT u.username, s.publish_token, s.yt_key, s.tw_key,
+                                    s.vk_url, s.vk_key
                              FROM users u JOIN streams s ON s.user_id = u.id
                              WHERE u.totp_enabled = 1 ORDER BY u.id"""):
         name, token, yt, tw = row["username"], row["publish_token"], row["yt_key"], row["tw_key"]
+        vk_url, vk_key = row["vk_url"], row["vk_key"]
         if not (core.USER_RE.fullmatch(name) and core.TOKEN_RE.fullmatch(token)):
             continue
         pushes = ""
@@ -40,6 +42,9 @@ def render(db):
             pushes += f"    push rtmp://a.rtmp.youtube.com/live2/{yt};\n"
         if tw and core.KEY_RE.fullmatch(tw):
             pushes += f"    push rtmp://live.twitch.tv/app/{tw};\n"
+        if (vk_url and vk_key and core.VK_URL_RE.fullmatch(vk_url)
+                and core.VK_KEY_RE.fullmatch(vk_key)):
+            pushes += f"    push {vk_url.rstrip('/')}/{vk_key};\n"
         out.append(APP.format(token=token, username=name, pushes=pushes))
     return "\n".join(out)
 

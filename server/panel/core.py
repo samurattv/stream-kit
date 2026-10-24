@@ -18,6 +18,9 @@ STATUS_PATH = os.path.join(DATA_DIR, "apply.status")
 # Ключи попадают в конфиг nginx, поэтому только безопасные символы: без пробелов,
 # точки с запятой, слэшей и кавычек.
 KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{8,80}$")
+# VK Видео Live: адрес сервера (только rtmp, nginx-rtmp не умеет rtmps) и ключ потока
+VK_URL_RE = re.compile(r"^rtmp://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9_.-]+)*/?$")
+VK_KEY_RE = re.compile(r"^[A-Za-z0-9_.\-]{6,120}$")
 USER_RE = re.compile(r"^[a-z0-9_]{3,24}$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{24}$")
 
@@ -47,6 +50,8 @@ CREATE TABLE IF NOT EXISTS streams (
     publish_token TEXT NOT NULL,
     yt_key TEXT NOT NULL DEFAULT '',
     tw_key TEXT NOT NULL DEFAULT '',
+    vk_url TEXT NOT NULL DEFAULT '',
+    vk_key TEXT NOT NULL DEFAULT '',
     updated REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit (
@@ -68,6 +73,12 @@ def connect(path=None, readonly=False):
     db.execute("PRAGMA foreign_keys = ON")
     if not readonly:
         db.executescript(SCHEMA)
+        # база, созданная до появления VK Live, получает новые столбцы
+        have = {r["name"] for r in db.execute("PRAGMA table_info(streams)")}
+        for col in ("vk_url", "vk_key"):
+            if col not in have:
+                db.execute(f"ALTER TABLE streams ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        db.commit()
     return db
 
 

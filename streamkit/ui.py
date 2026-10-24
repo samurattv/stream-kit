@@ -292,6 +292,13 @@ class App(ctk.CTk):
         ctk.CTkLabel(body, text="ID или ссылка на трансляцию. Чат читается, пока эфир идёт.",
                      font=self.f_small, text_color=TEXT2, anchor="w").pack(anchor="w", pady=(8, 0))
 
+        body = self.card(page, "VK Видео Live — чат канала")
+        r = self.row(body)
+        self.label(r, "Канал").pack(side="left", padx=(0, 8))
+        self.entry(r, "vk_channel", width=260)
+        ctk.CTkLabel(body, text="Имя канала или ссылка вида live.vkvideo.ru/имя. Ключи не нужны.",
+                     font=self.f_small, text_color=TEXT2, anchor="w").pack(anchor="w", pady=(8, 0))
+
         body = self.card(page, "PRISM / OBS")
         r = self.row(body)
         self.label(r, "Хост").pack(side="left", padx=(0, 8))

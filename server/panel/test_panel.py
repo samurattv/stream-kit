@@ -191,6 +191,25 @@ class KeysTests(Base):
         row = self.db.execute("SELECT yt_key FROM streams").fetchone()
         self.assertTrue(row is None or row["yt_key"] == "")
 
+    def test_vk_needs_both_fields_and_is_validated(self):
+        self.assertEqual(self.post_keys(vk_url="rtmp://ovsu.example.ru/input/").status_code, 400)
+        self.assertEqual(self.post_keys(vk="abc123_def.456").status_code, 400)
+        for bad_url in ("rtmps://a.b/c", "rtmp://a.b/c;exec_push x", "http://a.b/c",
+                        "rtmp://a b/c", "rtmp://a.b/c\nx"):
+            r = self.post_keys(vk_url=bad_url, vk="abc123_def.456")
+            self.assertEqual(r.status_code, 400, bad_url)
+        for bad_key in ("short", "has space in it", "key;exec_push", "a/b/c/d/e/f"):
+            r = self.post_keys(vk_url="rtmp://ovsu.example.ru/input/", vk=bad_key)
+            self.assertEqual(r.status_code, 400, bad_key)
+        r = self.post_keys(vk_url="rtmp://ovsu.example.ru/input/", vk="1234567_abc.def-8")
+        self.assertEqual(r.status_code, 302)
+        html = self.c.get("/").get_data(as_text=True)
+        self.assertIn("…ef-8", html)
+        self.assertNotIn("1234567_abc.def-8", html)
+        self.post_keys(clear_vk="1")
+        row = self.db.execute("SELECT * FROM streams").fetchone()
+        self.assertEqual((row["vk_url"], row["vk_key"]), ("", ""))
+
     def test_empty_field_keeps_old_key_and_clear_removes_it(self):
         self.post_keys(yt="abcd-efgh-ijkl-mnop")
         self.post_keys(yt="", tw="live_123456_AbCdEfGh")
@@ -249,6 +268,24 @@ class AdminTests(Base):
         self.assertEqual(r.status_code, 400)
 
 
+class MigrationTests(unittest.TestCase):
+    def test_old_database_gets_vk_columns(self):
+        import sqlite3
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        old = sqlite3.connect(path)
+        old.executescript("""CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE streams (user_id INTEGER PRIMARY KEY, publish_token TEXT NOT NULL,
+                yt_key TEXT NOT NULL DEFAULT '', tw_key TEXT NOT NULL DEFAULT '',
+                updated REAL NOT NULL);
+            INSERT INTO streams VALUES (1, 'tok', 'yt', 'tw', 0);""")
+        old.commit()
+        old.close()
+        db = core.connect(path)
+        row = db.execute("SELECT * FROM streams").fetchone()
+        self.assertEqual((row["yt_key"], row["vk_url"], row["vk_key"]), ("yt", "", ""))
+        db.close()
+
+
 class ApplyTests(Base):
     def test_render_is_safe_and_skips_inactive(self):
         uid, _ = self.make_user("liza")
@@ -263,7 +300,14 @@ class ApplyTests(Base):
         self.db.execute("INSERT INTO streams (user_id, publish_token, yt_key, updated)"
                         " VALUES (?,?,?,0)", (pending, "c" * 24, "abcd-efgh-ijkl"))
         self.db.commit()
+        self.db.execute("UPDATE streams SET vk_url='rtmp://ovsu.example.ru/input/', "
+                        "vk_key='1234567_abc.def' WHERE user_id=?", (uid,))
+        self.db.execute("UPDATE streams SET vk_url='rtmp://x.y/z;exec_push calc', "
+                        "vk_key='1234567_abc' WHERE user_id=?", (bad,))
+        self.db.commit()
         out = apply_mod.render(core.connect(readonly=True))
+        self.assertIn("push rtmp://ovsu.example.ru/input/1234567_abc.def;", out)
+        self.assertEqual(out.count("push rtmp://ovsu"), 1)
         self.assertIn("application u_" + "a" * 24, out)
         self.assertIn("push rtmp://a.rtmp.youtube.com/live2/abcd-efgh-ijkl;", out)
         self.assertIn("deny play all;", out)
