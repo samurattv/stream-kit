@@ -15,6 +15,7 @@ DEFAULTS = {
     "twitch_channel": "",
     "youtube_video_id": "",
     "youtube_api_key": "",
+    "vk_channel": "",
     "ws_host": "localhost",
     "ws_port": 4455,
     "ws_password": "",
