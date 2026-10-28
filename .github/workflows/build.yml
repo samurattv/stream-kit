@@ -37,6 +37,7 @@ jobs:
           --collect-all websockets
           --collect-all customtkinter
           --add-data "streamkit/avatar;streamkit/avatar"
+          --add-data "streamkit/multichat;streamkit/multichat"
           --hidden-import psutil
           --hidden-import truststore
           run.py

@@ -49,6 +49,8 @@ DEFAULTS = {
     "avatar_port": 8765,
     "avatar_chat": True,
     "avatar_look": {},
+    "enable_multichat": False,
+    "multichat_port": 8770,
     "theme": "dark",
     # озвучка
     "tts_variety": True,        # десятки голосов из пяти (скорость и высота)
