@@ -36,10 +36,12 @@ class Worker(threading.Thread):
 
 
 class ChatTTS(Worker):
-    """Читает чаты Twitch и YouTube и озвучивает их голосами Silero."""
+    """Читает чаты Twitch, YouTube и VK Live и озвучивает их голосами Silero."""
 
-    def __init__(self, cfg, log, obs=None):
+    def __init__(self, cfg, log, obs=None, speak=True):
         super().__init__(cfg, log, obs)
+        self.speak = speak          # False — только читаем чаты (для мультичата), без озвучки
+        self.on_chat = None         # сюда подключается мультичат: on_chat({"platform", "user", "parts"})
         self.queue = queue.Queue(maxsize=12)
         self.model = None
         self.on_command = None      # сюда подключается аватар: on_command(user, текст)
@@ -80,23 +82,24 @@ class ChatTTS(Worker):
             return False
 
     def run(self):
-        import torch
-        if not os.path.isfile(f"{MODEL_ID}.pt"):
-            self.log("tts", "качаю модель озвучки, это разово (~100 МБ)")
-            if not self.download_model():
+        if self.speak:
+            import torch
+            if not os.path.isfile(f"{MODEL_ID}.pt"):
+                self.log("tts", "качаю модель озвучки, это разово (~100 МБ)")
+                if not self.download_model():
+                    return
+
+            torch.set_num_threads(4)
+            try:
+                self.model = torch.package.PackageImporter(f"{MODEL_ID}.pt") \
+                    .load_pickle("tts_models", "model")
+            except Exception as e:
+                self.log("err", f"модель битая, удали {MODEL_ID}.pt и запусти снова: {e}")
                 return
+            self.model.to(torch.device("cpu"))
+            self.log("tts", "движок озвучки готов")
 
-        torch.set_num_threads(4)
-        try:
-            self.model = torch.package.PackageImporter(f"{MODEL_ID}.pt") \
-                .load_pickle("tts_models", "model")
-        except Exception as e:
-            self.log("err", f"модель битая, удали {MODEL_ID}.pt и запусти снова: {e}")
-            return
-        self.model.to(torch.device("cpu"))
-        self.log("tts", "движок озвучки готов")
-
-        threading.Thread(target=self.speak_loop, daemon=True).start()
+            threading.Thread(target=self.speak_loop, daemon=True).start()
         if self.cfg.get("youtube_video_id", "").strip():
             threading.Thread(target=self.youtube_loop, daemon=True).start()
         if self.cfg.get("vk_channel", "").strip():
@@ -204,7 +207,7 @@ class ChatTTS(Worker):
                             continue
                         user = item["authorDetails"]["displayName"].lower().lstrip("@")
                         raw = item["snippet"].get("displayMessage", "").strip()
-                        self.handle_message(user, raw)
+                        self.handle_message(user, raw, "youtube")
                 first = False
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", errors="ignore")
@@ -239,18 +242,47 @@ class ChatTTS(Worker):
         m = re.search(r"vkvideo\.ru/([\w.\-]+)", raw)
         return (m.group(1) if m else raw).lower()
 
-    @staticmethod
-    def vk_message(push):
-        """Достаёт (ник, текст) из сообщения чата VK Live; для служебных событий возвращает None."""
+    VK_LAUGH = ("kek", "lul", "lol", "lmao", "haha", "xaxa", "ха", "смех", "ржак", "joy")
+
+    @classmethod
+    def vk_smile(cls, name, channel, mode):
+        """Смайл канала VK Live как слово для озвучки. Имена вида «канал+Название», приставку убираем."""
+        name = str(name or "")
+        if channel and name.lower().startswith(channel) and len(name) > len(channel):
+            name = name[len(channel):]
+        if mode == "say":
+            return name
+        if mode == "laugh" and any(w in name.lower() for w in cls.VK_LAUGH):
+            return "ха ха"
+        return ""
+
+    VK_IMG = "https://images.live.vkvideo.ru/"
+
+    @classmethod
+    def vk_message(cls, push, channel="", mode="laugh"):
+        """Достаёт (ник, текст для озвучки, части для мультичата) из сообщения чата VK Live.
+        Для служебных событий возвращает None."""
         try:
             pub = push["push"]["pub"]["data"]
             if pub.get("type") != "message":
                 return None
             msg = pub["data"]
             user = str(msg["author"]["displayName"]).lower().lstrip("@")
-            parts = []
+            spoken, shown = [], []
             for part in msg.get("data", []):
-                if part.get("type") != "text" or not part.get("content"):
+                kind = part.get("type")
+                if kind == "smile":
+                    word = cls.vk_smile(part.get("name"), channel, mode)
+                    if word:
+                        spoken.append(word)
+                    img = part.get("mediumUrl") or part.get("smallUrl") or ""
+                    if isinstance(img, str) and img.startswith(cls.VK_IMG):
+                        shown.append({"img": img, "name": str(part.get("name") or "")})
+                    continue
+                if kind == "mention" and part.get("displayName"):
+                    shown.append({"text": "@" + str(part["displayName"])})
+                    continue
+                if kind != "text" or not part.get("content"):
                     continue
                 content = part["content"]
                 try:                                # текст приходит как JSON-массив ["текст", ...]
@@ -259,9 +291,11 @@ class ChatTTS(Worker):
                 except ValueError:
                     pass
                 if isinstance(content, str):
-                    parts.append(content)
-            text = " ".join(parts).strip()
-            return (user, text) if user and text else None
+                    spoken.append(content)
+                    if content.strip():
+                        shown.append({"text": content})
+            text = " ".join(spoken).strip()
+            return (user, text, shown) if user and (text or shown) else None
         except (KeyError, TypeError, AttributeError):
             return None
 
@@ -293,9 +327,10 @@ class ChatTTS(Worker):
                         for line in raw.splitlines():
                             if not line.strip():
                                 continue
-                            parsed = self.vk_message(json.loads(line))
+                            parsed = self.vk_message(json.loads(line), name,
+                                                     self.cfg.get("tts_emotes", "laugh"))
                             if parsed:
-                                self.handle_message(*parsed)
+                                self.handle_message(parsed[0], parsed[1], "vk", parsed[2])
             except Exception as e:
                 if not self.stop_flag.is_set():
                     self.log("err", f"чат VK Live отвалился ({e}), повторю через 10 секунд")
@@ -308,10 +343,10 @@ class ChatTTS(Worker):
         except (TypeError, ValueError):
             return default
 
-    def handle_message(self, user, raw):
-        """Одно сообщение из чата: команды, фильтры, постановка в очередь на озвучку."""
+    def handle_message(self, user, raw, platform="twitch", parts=None):
+        """Одно сообщение из чата: команды, фильтры, мультичат, постановка в очередь на озвучку."""
         if raw[:1] == "!":
-            if self.cfg.get("tts_commands", True) and self.tts_command(user, raw):
+            if self.speak and self.cfg.get("tts_commands", True) and self.tts_command(user, raw):
                 return
             if self.on_command:
                 try:
@@ -319,6 +354,14 @@ class ChatTTS(Worker):
                 except Exception as e:
                     self.log("err", f"команда чата: {e}")
         if user in IGNORED_USERS or raw[:1] in ("!", "/", "$"):
+            return
+        if self.on_chat:
+            try:
+                self.on_chat({"platform": platform, "user": user,
+                              "parts": parts or [{"text": raw}]})
+            except Exception as e:
+                self.log("err", f"мультичат: {e}")
+        if not self.speak:
             return
         if self.voices.is_muted(user):
             return

@@ -13,6 +13,7 @@ import sounddevice as sd
 
 from . import config as cfg_store
 from .avatar import Avatar, launch_tracker
+from .multichat import MultiChat
 from .config import DEFAULTS, SAMPLE_RATE
 from .obs import ObsLink
 from .voices import EFFECTS, device_index, output_device_names
@@ -233,7 +234,8 @@ class App(ctk.CTk):
                               ("Озвучка", self.tab_tts),
                               ("League of Legends", self.tab_lol),
                               ("Valorant", self.tab_valorant),
-                              ("Аватар", self.tab_avatar)):
+                              ("Аватар", self.tab_avatar),
+                              ("Мультичат", self.tab_multichat)):
             # прокрутка внутри вкладки: в маленьком окне содержимое не обрезается, а прокручивается
             scroll = ctk.CTkScrollableFrame(self.tabs.add(name), fg_color="transparent",
                                             scrollbar_button_color=LINE,
@@ -482,6 +484,24 @@ class App(ctk.CTk):
         self.label(body, "Команды читает озвучка чата, поэтому она должна быть включена.",
                    dim=True).pack(anchor="w", pady=(6, 0))
 
+    def tab_multichat(self, page):
+        body = self.card(page, "Мультичат для OBS")
+        self.check(body, "Включить мультичат", self.bool_var("enable_multichat")).pack(anchor="w")
+        self.label(body, "Чат Twitch, YouTube и VK Видео Live одним списком прямо на стриме.\n"
+                         "1. Укажи чаты на вкладке «Основное» и нажми «Старт».\n"
+                         "2. В PRISM/OBS добавь источник «Браузер» (в PRISM: «Веб-страница»)\n"
+                         "    со ссылкой из кнопки ниже, размер примерно 500 на 700.\n"
+                         "    Фон прозрачный. Работает и при выключенной озвучке.",
+                   dim=True, justify="left").pack(anchor="w", pady=(8, 10))
+        r = self.row(body)
+        self.label(r, "Порт").pack(side="left", padx=(0, 8))
+        self.entry(r, "multichat_port", width=80)
+        self.button(r, "Ссылка для OBS", self.copy_multichat_url, width=160).pack(side="left", padx=(0, 8))
+        self.button(r, "Открыть", self.open_multichat, width=100).pack(side="left")
+        self.label(body, "В ссылку можно добавить: &size=28 (размер текста), &max=10 (сколько сообщений),\n"
+                         "&fade=40 (гаснуть через 40 секунд), &badges=0 (без значков TW/YT/VK).",
+                   dim=True, justify="left").pack(anchor="w", pady=(10, 0))
+
     # ---------------------------------------------------------------- тема
     def theme_text(self):
         return "Светлая тема" if self.theme == "dark" else "Тёмная тема"
@@ -528,6 +548,25 @@ class App(ctk.CTk):
         self.clipboard_clear()
         self.clipboard_append(url)
         self.log("sys", f"ссылка для PRISM скопирована: {url}")
+
+    def multichat_url(self):
+        try:
+            port = int(self.vars["multichat_port"].get())
+        except ValueError:
+            port = int(self.cfg["multichat_port"])
+        return f"http://127.0.0.1:{port}/index.html?ws={port + 1}"
+
+    def copy_multichat_url(self):
+        url = self.multichat_url()
+        self.clipboard_clear()
+        self.clipboard_append(url)
+        self.log("sys", f"ссылка на мультичат скопирована: {url}")
+
+    def open_multichat(self):
+        if not any(isinstance(w, MultiChat) for w in self.workers):
+            self.log("err", "мультичат не запущен: включи галочку и нажми «Старт»")
+            return
+        webbrowser.open(self.multichat_url())
 
     def pick_look(self, key):
         disp, names = self.look_disp[key]
@@ -670,10 +709,16 @@ class App(ctk.CTk):
         avatar = Avatar(self.cfg, self.log) if self.cfg["enable_avatar"] else None
         if avatar:
             self.workers.append(avatar)
-        if self.cfg["enable_tts"]:
-            tts = ChatTTS(self.cfg, self.log)
+        multichat = MultiChat(self.cfg, self.log) if self.cfg["enable_multichat"] else None
+        if multichat:
+            self.workers.append(multichat)
+        if self.cfg["enable_tts"] or multichat:
+            # без озвучки чаты читаются только ради мультичата
+            tts = ChatTTS(self.cfg, self.log, speak=bool(self.cfg["enable_tts"]))
             if avatar:
                 tts.on_command = avatar.handle_chat
+            if multichat:
+                tts.on_chat = multichat.push
             self.workers.append(tts)
         if self.cfg["enable_director"]:
             self.workers.append(Director(self.cfg, self.log, self.obs))
